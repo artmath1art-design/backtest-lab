@@ -86,24 +86,52 @@ function buildDecision(candles: Candle[], settings: Required<BotSettings>, posit
   const rsi14 = rsi(closes, 14);
   const previousRsi14 = rsi(closes.slice(0, -1), 14);
   const hasPosition = Math.abs(positionAmount) > 0;
+  const middleGapPct = band ? (Math.abs(current.close - band.middle) / band.middle) * 100 : null;
+  const lowerGapPct = band ? ((current.close - band.lower) / band.lower) * 100 : null;
+  const upperGapPct = band ? ((current.close - band.upper) / band.upper) * 100 : null;
+
+  const diagnostics = {
+    price: current.close,
+    candleTime: current.time,
+    rsi14,
+    previousRsi14,
+    bollinger: band,
+    middleGapPct,
+    lowerGapPct,
+    upperGapPct,
+    positionAmount,
+    entryPrice,
+    checks: {
+      rsiUnder55: Boolean(rsi14 && rsi14 <= 55),
+      rsiTurningUp: Boolean(rsi14 && previousRsi14 && rsi14 >= previousRsi14),
+      middleTouch: Boolean(middleGapPct !== null && middleGapPct <= 0.3),
+      middleRecovery: Boolean(band && previous.close < band.middle && current.close >= band.middle),
+    },
+  };
 
   if (hasPosition && entryPrice > 0) {
     const pnlPct = ((current.close - entryPrice) / entryPrice) * 100;
-    if (pnlPct >= settings.takeProfitPct) return { side: "SELL", reason: `익절 ${pnlPct.toFixed(2)}%`, pnlPct };
-    if (settings.stopLossPct > 0 && pnlPct <= -settings.stopLossPct) return { side: "SELL", reason: `손절 ${pnlPct.toFixed(2)}%`, pnlPct };
-    return { side: "HOLD", reason: `포지션 유지 ${pnlPct.toFixed(2)}%`, pnlPct };
+    if (pnlPct >= settings.takeProfitPct) return { side: "SELL", reason: `익절 ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    if (settings.stopLossPct > 0 && pnlPct <= -settings.stopLossPct) return { side: "SELL", reason: `손절 ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    return { side: "HOLD", reason: `포지션 유지 ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
   }
 
-  if (!band || !rsi14 || !previousRsi14) return { side: "WAIT", reason: "지표 데이터 부족" };
+  if (!band || !rsi14 || !previousRsi14) return { side: "WAIT", reason: "지표 데이터 부족", diagnostics };
 
   const middleGap = Math.abs(current.close - band.middle) / band.middle;
   const isMiddleTouch = middleGap <= 0.003;
   const isMiddleRecovery = previous.close < band.middle && current.close >= band.middle;
   const isRsiTurning = rsi14 >= previousRsi14;
-  const score = (rsi14 <= 55 ? 2 : 0) + (isRsiTurning ? 1 : 0) + (isMiddleTouch || isMiddleRecovery ? 2 : 0);
+  const scoreParts = {
+    rsi: rsi14 <= 55 ? 2 : 0,
+    rsiTurn: isRsiTurning ? 1 : 0,
+    bollingerMiddle: isMiddleTouch || isMiddleRecovery ? 2 : 0,
+  };
+  const score = scoreParts.rsi + scoreParts.rsiTurn + scoreParts.bollingerMiddle;
+  const detailDiagnostics = { ...diagnostics, scoreParts, score };
 
-  if (score >= 4) return { side: "BUY", reason: `RSI(14) ${rsi14.toFixed(1)}, 볼밴 중단 근접/회복`, score };
-  return { side: "WAIT", reason: `조건 미충족 score ${score}`, score };
+  if (score >= 4) return { side: "BUY", reason: `RSI(14) ${rsi14.toFixed(1)}, 볼밴 중단 근접/회복`, score, diagnostics: detailDiagnostics };
+  return { side: "WAIT", reason: `조건 미충족 score ${score}`, score, diagnostics: detailDiagnostics };
 }
 
 async function hmacSha256(secret: string, payload: string) {

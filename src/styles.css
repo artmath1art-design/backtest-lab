@@ -266,6 +266,7 @@ select {
 
 .testnet-summary,
 .testnet-actions,
+.diagnostic-panel,
 .testnet-task {
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 8px;
@@ -273,7 +274,8 @@ select {
 }
 
 .testnet-summary,
-.testnet-actions {
+.testnet-actions,
+.diagnostic-panel {
   padding: 16px;
 }
 
@@ -334,6 +336,53 @@ select {
   gap: 10px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 14px;
+}
+
+.diagnostic-panel {
+  margin-top: 14px;
+}
+
+.diagnostic-grid {
+  display: grid;
+  gap: 10px 16px;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+}
+
+.diagnostic-grid span {
+  color: #93a4b8;
+  display: block;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.diagnostic-grid strong {
+  color: #edf6ff;
+  display: block;
+  font-size: 15px;
+}
+
+.check-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 14px;
+}
+
+.check-grid div {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 6px;
+  color: #93a4b8;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  justify-content: space-between;
+  min-height: 38px;
+  padding: 10px;
+}
+
+.check-grid div.pass {
+  border-color: rgba(61, 220, 151, 0.34);
+  color: #b9f7d9;
 }
 
 .testnet-task {

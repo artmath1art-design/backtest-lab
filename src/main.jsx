@@ -444,9 +444,11 @@ function TestnetPanel({ settings }) {
   const stopLossLabel = settings.stopLossPct === 0 ? "노손절" : `${settings.stopLossPct}%`;
   const [testnetStatus, setTestnetStatus] = useState("Supabase URL과 Publishable key를 .env.local에 넣으면 연결 테스트를 시작할 수 있습니다.");
   const [testnetLoading, setTestnetLoading] = useState(false);
+  const [testnetDetail, setTestnetDetail] = useState(null);
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
   const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
   const canInvoke = Boolean(supabaseUrl && publishableKey);
+  const diagnostics = testnetDetail?.decision?.diagnostics;
 
   async function invokeTestnet(action) {
     if (!canInvoke) {
@@ -476,6 +478,7 @@ function TestnetPanel({ settings }) {
       });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error ?? response.statusText);
+      setTestnetDetail(data);
       setTestnetStatus(action === "check" ? `연결 확인 완료: dry-run ${data.dryRun ? "ON" : "OFF"}` : `${data.decision?.side}: ${data.decision?.reason}`);
     } catch (error) {
       setTestnetStatus(`실패: ${error.message}`);
@@ -515,6 +518,28 @@ function TestnetPanel({ settings }) {
           <p>{testnetStatus}</p>
         </div>
       </div>
+
+      {diagnostics ? (
+        <div className="diagnostic-panel">
+          <div className="summary-title">마지막 신호 상세</div>
+          <div className="diagnostic-grid">
+            <span>현재가</span><strong>${formatUsd(diagnostics.price)}</strong>
+            <span>RSI(14)</span><strong>{diagnostics.rsi14?.toFixed?.(1) ?? "--"}</strong>
+            <span>직전 RSI</span><strong>{diagnostics.previousRsi14?.toFixed?.(1) ?? "--"}</strong>
+            <span>볼밴 중단</span><strong>${formatUsd(diagnostics.bollinger?.middle)}</strong>
+            <span>중단 이격</span><strong>{formatPct(diagnostics.middleGapPct, 2)}</strong>
+            <span>하단 이격</span><strong>{formatPct(diagnostics.lowerGapPct, 2)}</strong>
+            <span>포지션</span><strong>{Number(diagnostics.positionAmount ?? 0).toFixed(3)} BTC</strong>
+            <span>진입가</span><strong>{diagnostics.entryPrice ? `$${formatUsd(diagnostics.entryPrice)}` : "--"}</strong>
+            <span>점수</span><strong>{diagnostics.score ?? "--"} / 5</strong>
+          </div>
+          <div className="check-grid">
+            <div className={diagnostics.checks?.rsiUnder55 ? "pass" : ""}>RSI 55 이하 <strong>{diagnostics.scoreParts?.rsi ?? 0}점</strong></div>
+            <div className={diagnostics.checks?.rsiTurningUp ? "pass" : ""}>RSI 반등 <strong>{diagnostics.scoreParts?.rsiTurn ?? 0}점</strong></div>
+            <div className={diagnostics.checks?.middleTouch || diagnostics.checks?.middleRecovery ? "pass" : ""}>볼밴 중단 근접/회복 <strong>{diagnostics.scoreParts?.bollingerMiddle ?? 0}점</strong></div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="testnet-tasks">
         {TESTNET_TASKS.map(({ icon: Icon, title, body }) => (
