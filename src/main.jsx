@@ -5,11 +5,10 @@ import "./styles.css";
 
 const BINANCE_BASE = "https://api.binance.com/api/v3/klines";
 const BINANCE_LIMIT = 1000;
-const RSI_OVERBOUGHT = 80;
-const RSI_OVERSOLD = 20;
-const TAKE_PROFIT_OPTIONS = [1, 2, 3, 4, 5];
+const TAKE_PROFIT_OPTIONS = [0.2, 1, 2, 3, 4, 5];
 const STOP_LOSS_OPTIONS = [
   { value: 0, label: "노손절" },
+  { value: 0.2, label: "0.2%" },
   { value: 1, label: "1%" },
   { value: 2, label: "2%" },
   { value: 3, label: "3%" },
@@ -18,9 +17,10 @@ const STOP_LOSS_OPTIONS = [
 ];
 const LEVERAGE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20];
 const BUY_STRATEGIES = [
-  { value: 1, label: "1", description: "중단 풀매수" },
-  { value: 2, label: "2", description: "중단/하단 반반" },
-  { value: 3, label: "3", description: "중단/하단/하단-1%" },
+  { value: 1, label: "롱숏", description: "윗꼬리 숏 / 아랫꼬리 롱" },
+  { value: 2, label: "롱만", description: "아랫꼬리 롱만" },
+  { value: 3, label: "숏만", description: "윗꼬리 숏만" },
+  { value: 4, label: "신중", description: "꼬리 후 다음봉 확인" },
 ];
 const INTERVALS = [
   { value: "1m", label: "1분봉", ms: 60_000 },
@@ -178,87 +178,56 @@ async function fetchHistoricalCandles({ interval, days }) {
   return candles.filter((candle, index, rows) => index === 0 || candle.time !== rows[index - 1].time);
 }
 
-function buildGagokDecision({ candles, index, entryPrice, entryStage, buyStrategy, takeProfitPct, stopLossPct }) {
-  const closes = candles.map((candle) => candle.close);
-  const historicalCloses = closes.slice(0, index + 1);
-  const price = closes[index];
-  const prev = candles[index - 1] ?? candles[index];
-  const rsiSeries = rsi(historicalCloses, 14);
-  const rsi14 = rsi(historicalCloses, 14).at(-1);
-  const prevRsi14 = rsiSeries.at(-2);
-  const bands = bollinger(historicalCloses, 20, 2);
-  const band = bands.at(-1);
-  const pnl = entryPrice ? ((price - entryPrice) / entryPrice) * 100 : null;
-  const middleGap = band ? Math.abs(price - band.middle) / band.middle : null;
-  const isMiddleTouch = middleGap !== null && middleGap <= 0.003;
-  const isMiddleRecovery = Boolean(band && prev.close < band.middle && price >= band.middle);
-  const isLowerTouch = Boolean(band && price <= band.lower * 1.003);
-  const isLowerMinusOneTouch = Boolean(band && price <= band.lower * 0.99);
-  const isRsiTurning = Boolean(rsi14 && prevRsi14 && rsi14 >= prevRsi14);
-  const takeProfit = entryPrice ? entryPrice * (1 + Number(takeProfitPct) / 100) : null;
-  const stopLoss = entryPrice && Number(stopLossPct) > 0 ? entryPrice * (1 - Number(stopLossPct) / 100) : null;
-  const buyReasons = [];
-  const sellReasons = [];
-  let buyScore = 0;
-  let sellScore = 0;
+function analyzeWick(candle) {
+  const range = Math.max(candle.high - candle.low, 0);
+  const body = Math.abs(candle.close - candle.open);
+  const upper = candle.high - Math.max(candle.open, candle.close);
+  const lower = Math.min(candle.open, candle.close) - candle.low;
+  const rangePct = range ? (range / candle.close) * 100 : 0;
+  const upperPct = range ? upper / range : 0;
+  const lowerPct = range ? lower / range : 0;
+  const bodyFloor = Math.max(body, range * 0.08);
+  const hasUpper = rangePct >= 0.05 && upperPct >= 0.45 && upper >= bodyFloor * 1.5 && upper > lower * 1.15;
+  const hasLower = rangePct >= 0.05 && lowerPct >= 0.45 && lower >= bodyFloor * 1.5 && lower > upper * 1.15;
 
-  if (entryStage === 0) {
-    if (rsi14 && rsi14 <= 55) {
-      buyScore += 2;
-      buyReasons.push(`RSI(14) ${rsi14.toFixed(1)}`);
-    }
-    if (isRsiTurning) {
-      buyScore += 1;
-      buyReasons.push("RSI 반등");
-    }
-    if (isMiddleTouch || isMiddleRecovery) {
-      buyScore += 2;
-      buyReasons.push(isMiddleRecovery ? "볼린저 중단선 회복" : "볼린저 중단선 근접");
-    }
+  return { range, body, upper, lower, rangePct, upperPct, lowerPct, hasUpper, hasLower };
+}
 
-    if (buyScore >= 4) return { side: buyStrategy === 1 ? "BUY_FULL" : "BUY_1", score: buyScore, reason: buyReasons.join(", ") };
-    return { side: "WAIT", score: buyScore, reason: buyReasons.join(", ") };
+function buildGagokDecision({ candles, index, entryPrice, positionSide, buyStrategy, takeProfitPct, stopLossPct }) {
+  const candle = candles[index];
+  const previous = candles[index - 1];
+  const price = candle.close;
+  const wick = analyzeWick(candle);
+  const previousWick = previous ? analyzeWick(previous) : null;
+  const strategy = Number(buyStrategy);
+  const allowLong = strategy === 1 || strategy === 2 || strategy === 4;
+  const allowShort = strategy === 1 || strategy === 3 || strategy === 4;
+  const isConfirmLong = Boolean(previousWick?.hasLower && candle.close > candle.open);
+  const isConfirmShort = Boolean(previousWick?.hasUpper && candle.close < candle.open);
+
+  if (entryPrice && positionSide) {
+    const pnl = positionSide === "LONG" ? ((price - entryPrice) / entryPrice) * 100 : ((entryPrice - price) / entryPrice) * 100;
+    if (pnl >= Number(takeProfitPct)) return { side: `CLOSE_${positionSide}`, score: 5, reason: `익절 ${pnl.toFixed(2)}%` };
+    if (Number(stopLossPct) > 0 && pnl <= -Number(stopLossPct)) return { side: `CLOSE_${positionSide}`, score: 5, reason: `손절 ${pnl.toFixed(2)}%` };
+    return { side: "HOLD", score: 0, reason: `${positionSide} 보유 ${pnl.toFixed(2)}%` };
   }
 
-  if (entryStage === 1 && buyStrategy >= 2) {
-    if (rsi14 && rsi14 <= 40) {
-      buyScore += 2;
-      buyReasons.push(`RSI(14) ${rsi14.toFixed(1)} 과매도`);
-    }
-    if (isLowerTouch) {
-      buyScore += 3;
-      buyReasons.push("볼린저 하단 터치");
-    }
-
-    if (buyScore >= 3) return { side: "BUY_2", score: buyScore, reason: buyReasons.join(", ") };
+  if (strategy === 4 && allowShort && isConfirmShort) {
+    return { side: "SHORT", score: 5, reason: `신중 숏: 직전 윗꼬리 후 음봉 확인` };
   }
-
-  if (entryStage === 2 && buyStrategy === 3) {
-    if (rsi14 && rsi14 <= 35) {
-      buyScore += 2;
-      buyReasons.push(`RSI(14) ${rsi14.toFixed(1)} 깊은 과매도`);
-    }
-    if (isLowerMinusOneTouch) {
-      buyScore += 3;
-      buyReasons.push("볼린저 하단 -1% 터치");
-    }
-
-    if (buyScore >= 3) return { side: "BUY_3", score: buyScore, reason: buyReasons.join(", ") };
+  if (strategy === 4 && allowLong && isConfirmLong) {
+    return { side: "LONG", score: 5, reason: `신중 롱: 직전 아랫꼬리 후 양봉 확인` };
   }
-
-  if (entryPrice) {
-    if (takeProfit !== null && price >= takeProfit) {
-      sellScore += 5;
-      sellReasons.push(`익절 ${pnl?.toFixed(2)}%`);
-    }
-    if (stopLoss !== null && price <= stopLoss) {
-      sellScore += 5;
-      sellReasons.push(`손절 ${pnl?.toFixed(2)}%`);
-    }
+  if (strategy !== 4 && allowShort && wick.hasUpper) {
+    return { side: "SHORT", score: 5, reason: `윗꼬리 ${(wick.upperPct * 100).toFixed(0)}%: 숏 진입` };
   }
-
-  if (sellScore >= 4) return { side: "SELL", score: sellScore, reason: sellReasons.join(", ") };
-  return { side: "WAIT", score: Math.max(buyScore, sellScore), reason: [...buyReasons, ...sellReasons].join(", ") };
+  if (strategy !== 4 && allowLong && wick.hasLower) {
+    return { side: "LONG", score: 5, reason: `아랫꼬리 ${(wick.lowerPct * 100).toFixed(0)}%: 롱 진입` };
+  }
+  if (strategy === 4) {
+    return { side: "WAIT", score: 0, reason: `신중 조건 대기: 직전 상단 ${previousWick ? (previousWick.upperPct * 100).toFixed(0) : "--"}%, 직전 하단 ${previousWick ? (previousWick.lowerPct * 100).toFixed(0) : "--"}%` };
+  }
+  return { side: "WAIT", score: 0, reason: `꼬리 조건/방향 필터 미충족: 상단 ${(wick.upperPct * 100).toFixed(0)}%, 하단 ${(wick.lowerPct * 100).toFixed(0)}%` };
 }
 
 function runBacktest(candles, settings) {
@@ -266,10 +235,10 @@ function runBacktest(candles, settings) {
   const slippage = Number(settings.slippage) / 100;
   const leverage = Number(settings.leverage) || 1;
   let cash = Number(settings.initialCash);
-  let btc = 0;
+  let positionAmount = 0;
+  let positionSide = null;
   let marginUsed = 0;
   let entryPrice = null;
-  let entryStage = 0;
   let peakEquity = cash;
   let maxDrawdown = 0;
   const trades = [];
@@ -282,26 +251,23 @@ function runBacktest(candles, settings) {
       candles,
       index,
       entryPrice,
-      entryStage,
+      positionSide,
       buyStrategy: settings.buyStrategy,
       takeProfitPct: settings.takeProfitPct,
       stopLossPct: settings.stopLossPct,
     });
 
-    if (decision.side.startsWith("BUY") && cash > 0) {
-      const buyStrategy = Number(settings.buyStrategy);
-      const spendRatio = buyStrategy === 1 ? 1 : buyStrategy === 2 ? 0.5 : 1 / 3;
-      const margin = Math.min(cash, Number(settings.initialCash) * spendRatio);
+    if ((decision.side === "LONG" || decision.side === "SHORT") && cash > 0 && !positionSide) {
+      const margin = Math.min(cash, Number(settings.initialCash));
       const notional = margin * leverage;
-      const fillPrice = price * (1 + slippage);
+      const fillPrice = decision.side === "LONG" ? price * (1 + slippage) : price * (1 - slippage);
       const fee = notional * feeRate;
       const amount = notional / fillPrice;
-      const previousCost = btc * (entryPrice ?? 0);
       cash -= margin + fee;
       marginUsed += margin;
-      btc += amount;
-      entryPrice = (previousCost + amount * fillPrice) / btc;
-      entryStage = decision.side === "BUY_FULL" ? 3 : decision.side === "BUY_1" ? 1 : decision.side === "BUY_2" ? 2 : 3;
+      positionAmount = amount;
+      positionSide = decision.side;
+      entryPrice = fillPrice;
       trades.push({
         side: decision.side,
         time: candle.time,
@@ -312,41 +278,43 @@ function runBacktest(candles, settings) {
         pnlPct: null,
         reason: decision.reason,
       });
-    } else if (decision.side === "SELL" && btc > 0) {
-      const fillPrice = price * (1 - slippage);
-      const gross = btc * fillPrice;
+    } else if (decision.side.startsWith("CLOSE") && positionAmount > 0) {
+      const fillPrice = positionSide === "LONG" ? price * (1 - slippage) : price * (1 + slippage);
+      const gross = positionAmount * fillPrice;
       const fee = gross * feeRate;
-      const cost = btc * entryPrice;
-      const pnl = gross - cost - fee;
+      const cost = positionAmount * entryPrice;
+      const pnl = (positionSide === "LONG" ? gross - cost : cost - gross) - fee;
       const pnlPct = marginUsed ? (pnl / marginUsed) * 100 : 0;
       cash += marginUsed + pnl;
       trades.push({
-        side: "SELL",
+        side: decision.side,
         time: candle.time,
         price: fillPrice,
-        amount: btc,
+        amount: positionAmount,
         fee,
         pnl,
         pnlPct,
         reason: decision.reason,
       });
-      btc = 0;
+      positionAmount = 0;
+      positionSide = null;
       marginUsed = 0;
       entryPrice = null;
-      entryStage = 0;
     }
 
-    const equity = cash + (btc > 0 && entryPrice ? marginUsed + btc * (price - entryPrice) : 0);
+    const unrealized = positionSide === "LONG" ? positionAmount * (price - entryPrice) : positionSide === "SHORT" ? positionAmount * (entryPrice - price) : 0;
+    const equity = cash + (positionAmount > 0 && entryPrice ? marginUsed + unrealized : 0);
     peakEquity = Math.max(peakEquity, equity);
     maxDrawdown = Math.min(maxDrawdown, ((equity - peakEquity) / peakEquity) * 100);
     equityCurve.push({ time: candle.time, equity });
   });
 
   const lastPrice = candles.at(-1)?.close ?? 0;
-  const finalEquity = cash + (btc > 0 && entryPrice ? marginUsed + btc * (lastPrice - entryPrice) : 0);
-  const sells = trades.filter((trade) => trade.side === "SELL");
-  const wins = sells.filter((trade) => trade.pnl > 0).length;
-  const losses = sells.filter((trade) => trade.pnl < 0).length;
+  const finalUnrealized = positionSide === "LONG" ? positionAmount * (lastPrice - entryPrice) : positionSide === "SHORT" ? positionAmount * (entryPrice - lastPrice) : 0;
+  const finalEquity = cash + (positionAmount > 0 && entryPrice ? marginUsed + finalUnrealized : 0);
+  const exits = trades.filter((trade) => trade.side.startsWith("CLOSE"));
+  const wins = exits.filter((trade) => trade.pnl > 0).length;
+  const losses = exits.filter((trade) => trade.pnl < 0).length;
   return {
     candles,
     trades,
@@ -356,8 +324,8 @@ function runBacktest(candles, settings) {
     maxDrawdown,
     wins,
     losses,
-    winRate: sells.length ? (wins / sells.length) * 100 : null,
-    sellCount: sells.length,
+    winRate: exits.length ? (wins / exits.length) * 100 : null,
+    sellCount: exits.length,
     totalFees: trades.reduce((sum, trade) => sum + trade.fee, 0),
   };
 }
@@ -402,7 +370,7 @@ function BacktestChart({ result }) {
       })}
       {trades.map((trade) => (
         <g key={`${trade.side}-${trade.time}-${trade.price}`}>
-          <circle cx={xAt(trade.time)} cy={yAt(trade.price)} r="5" fill={trade.side.startsWith("BUY") ? "#38bdf8" : "#fbbf24"} />
+          <circle cx={xAt(trade.time)} cy={yAt(trade.price)} r="5" fill={trade.side === "LONG" ? "#38bdf8" : trade.side === "SHORT" ? "#ff6b7a" : "#fbbf24"} />
           <text x={xAt(trade.time) + 7} y={yAt(trade.price) - 7} fill="#dbeafe" fontSize="11">
             {trade.side}
           </text>
@@ -445,6 +413,7 @@ function TestnetPanel({ settings }) {
   const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
   const canInvoke = Boolean(supabaseUrl && publishableKey);
   const diagnostics = testnetDetail?.decision?.diagnostics;
+  const testnetMetrics = testnetDetail?.metrics;
   const lastDecision = testnetDetail?.decision?.side ?? "READY";
   const statusTone = testnetStatus.startsWith("실패") ? "bad" : lastDecision === "BUY" || lastDecision === "SELL" ? "good" : "neutral";
 
@@ -569,22 +538,35 @@ function TestnetPanel({ settings }) {
           </div>
           <div className="diagnostic-grid">
             <span>현재가</span><strong>${formatUsd(diagnostics.price)}</strong>
-            <span>RSI(14)</span><strong>{diagnostics.rsi14?.toFixed?.(1) ?? "--"}</strong>
-            <span>직전 RSI</span><strong>{diagnostics.previousRsi14?.toFixed?.(1) ?? "--"}</strong>
-            <span>볼밴 중단</span><strong>${formatUsd(diagnostics.bollinger?.middle)}</strong>
-            <span>중단 이격</span><strong>{formatPct(diagnostics.middleGapPct, 2)}</strong>
-            <span>하단 이격</span><strong>{formatPct(diagnostics.lowerGapPct, 2)}</strong>
+            <span>윗꼬리</span><strong>{diagnostics.wick?.upperPct === undefined ? "--" : `${(diagnostics.wick.upperPct * 100).toFixed(0)}%`}</strong>
+            <span>아랫꼬리</span><strong>{diagnostics.wick?.lowerPct === undefined ? "--" : `${(diagnostics.wick.lowerPct * 100).toFixed(0)}%`}</strong>
+            <span>캔들폭</span><strong>{formatPct(diagnostics.wick?.rangePct, 2)}</strong>
+            <span>몸통</span><strong>${formatUsd(diagnostics.wick?.body)}</strong>
+            <span>직전 윗꼬리</span><strong>{diagnostics.previousWick?.upperPct === undefined ? "--" : `${(diagnostics.previousWick.upperPct * 100).toFixed(0)}%`}</strong>
+            <span>직전 아랫꼬리</span><strong>{diagnostics.previousWick?.lowerPct === undefined ? "--" : `${(diagnostics.previousWick.lowerPct * 100).toFixed(0)}%`}</strong>
+            <span>꼬리기준</span><strong>45% / 몸통 1.5x</strong>
             <span>포지션</span><strong>{Number(diagnostics.positionAmount ?? 0).toFixed(3)} BTC</strong>
             <span>진입가</span><strong>{diagnostics.entryPrice ? `$${formatUsd(diagnostics.entryPrice)}` : "--"}</strong>
             <span>Dry-run</span><strong>{testnetDetail?.dryRun ? "ON" : "OFF"}</strong>
           </div>
           <div className="check-grid">
-            <div className={diagnostics.checks?.rsiUnder55 ? "pass" : ""}>RSI 55 이하 <strong>{diagnostics.scoreParts?.rsi ?? 0}점</strong></div>
-            <div className={diagnostics.checks?.rsiTurningUp ? "pass" : ""}>RSI 반등 <strong>{diagnostics.scoreParts?.rsiTurn ?? 0}점</strong></div>
-            <div className={diagnostics.checks?.middleTouch || diagnostics.checks?.middleRecovery ? "pass" : ""}>볼밴 중단 근접/회복 <strong>{diagnostics.scoreParts?.bollingerMiddle ?? 0}점</strong></div>
+            <div className={diagnostics.checks?.upperWickShort ? "pass" : ""}>윗꼬리 숏 <strong>{diagnostics.checks?.upperWickShort ? "충족" : "대기"}</strong></div>
+            <div className={diagnostics.checks?.lowerWickLong ? "pass" : ""}>아랫꼬리 롱 <strong>{diagnostics.checks?.lowerWickLong ? "충족" : "대기"}</strong></div>
+            <div className={diagnostics.checks?.confirmShort || diagnostics.checks?.confirmLong ? "pass" : ""}>확인봉 <strong>{diagnostics.checks?.confirmShort ? "음봉" : diagnostics.checks?.confirmLong ? "양봉" : "대기"}</strong></div>
           </div>
         </div>
       ) : null}
+
+      <div className="testnet-performance-panel">
+        <div className="summary-title">테스트넷 운영 요약</div>
+        <div className="testnet-stat-grid">
+          <StatCard icon={Wallet} title="증거금" value={`$${formatUsd(testnetMetrics?.marginUsdt)}`} caption="BOT_MARGIN_USDT 기준" />
+          <StatCard icon={Gauge} title="평가금" value={`$${formatUsd(testnetMetrics?.finalEquityUsdt)}`} caption={`미실현 $${formatUsd(testnetMetrics?.unrealizedProfit)}`} />
+          <StatCard icon={BarChart3} title="수익률" value={formatPct(testnetMetrics?.totalReturnPct)} caption="현재 포지션 기준" tone={Number(testnetMetrics?.totalReturnPct ?? 0) >= 0 ? "good" : "bad"} />
+          <StatCard icon={ShieldAlert} title="낙폭" value={formatPct(testnetMetrics?.maxDrawdownPct)} caption="최근 이벤트 기준" tone="bad" />
+          <StatCard icon={Activity} title="승률" value={testnetMetrics?.winRatePct === null || testnetMetrics?.winRatePct === undefined ? "--" : `${testnetMetrics.winRatePct.toFixed(1)}%`} caption={`승 ${testnetMetrics?.wins ?? 0} / 패 ${testnetMetrics?.losses ?? 0}`} />
+        </div>
+      </div>
 
       <div className="testnet-events-panel">
         <div className="diagnostic-head">
@@ -622,10 +604,10 @@ function App() {
     initialCash: 50000,
     feeRate: 0.04,
     slippage: 0.02,
-    buyStrategy: 2,
+    buyStrategy: 1,
     leverage: 1,
-    takeProfitPct: 1,
-    stopLossPct: 1,
+    takeProfitPct: 0.2,
+    stopLossPct: 0.2,
   });
   const [status, setStatus] = useState("조건을 입력하고 백테스트를 실행하세요.");
   const [result, setResult] = useState(null);
@@ -775,7 +757,7 @@ function App() {
           </div>
           <div className="strategy-note">
             <strong>전략</strong>
-            <span>RSI(14) + Bollinger(20,2): 선택 매수전략과 레버리지로 진입, 평균단가 기준 선택 익절/손절</span>
+            <span>15분봉 꼬리 반전: 윗꼬리 기준 충족 시 숏, 아랫꼬리 기준 충족 시 롱, 익절/손절 0.2%</span>
           </div>
         </aside>
 
@@ -810,7 +792,7 @@ function App() {
             <div className="trade-list">
               {recentTrades.length ? recentTrades.map((trade) => (
                 <div className="trade-row" key={`${trade.side}-${trade.time}-${trade.price}`}>
-                  <span className={trade.side.startsWith("BUY") ? "buy" : "sell"}>{trade.side}</span>
+                  <span className={trade.side === "LONG" ? "buy" : "sell"}>{trade.side}</span>
                   <span>{new Date(trade.time * 1000).toLocaleString()}</span>
                   <span>${formatUsd(trade.price)}</span>
                   <span>{trade.pnlPct === null || trade.pnlPct === undefined ? "--" : formatPct(trade.pnlPct)}</span>

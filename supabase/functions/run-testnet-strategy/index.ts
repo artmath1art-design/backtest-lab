@@ -79,60 +79,62 @@ function rsi(values: number[], period = 14) {
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
+function analyzeWick(candle: Candle) {
+  const range = Math.max(candle.high - candle.low, 0);
+  const body = Math.abs(candle.close - candle.open);
+  const upper = candle.high - Math.max(candle.open, candle.close);
+  const lower = Math.min(candle.open, candle.close) - candle.low;
+  const rangePct = range ? (range / candle.close) * 100 : 0;
+  const upperPct = range ? upper / range : 0;
+  const lowerPct = range ? lower / range : 0;
+  const bodyFloor = Math.max(body, range * 0.08);
+  const hasUpper = rangePct >= 0.05 && upperPct >= 0.45 && upper >= bodyFloor * 1.5 && upper > lower * 1.15;
+  const hasLower = rangePct >= 0.05 && lowerPct >= 0.45 && lower >= bodyFloor * 1.5 && lower > upper * 1.15;
+
+  return { range, body, upper, lower, rangePct, upperPct, lowerPct, hasUpper, hasLower };
+}
+
 function buildDecision(candles: Candle[], settings: Required<BotSettings>, positionAmount: number, entryPrice: number) {
-  const closes = candles.map((candle) => candle.close);
-  const current = candles.at(-1)!;
-  const previous = candles.at(-2) ?? current;
-  const band = bollinger(closes, 20, 2);
-  const rsi14 = rsi(closes, 14);
-  const previousRsi14 = rsi(closes.slice(0, -1), 14);
+  const current = candles.at(-2) ?? candles.at(-1)!;
+  const previous = candles.at(-3);
   const hasPosition = Math.abs(positionAmount) > 0;
-  const middleGapPct = band ? (Math.abs(current.close - band.middle) / band.middle) * 100 : null;
-  const lowerGapPct = band ? ((current.close - band.lower) / band.lower) * 100 : null;
-  const upperGapPct = band ? ((current.close - band.upper) / band.upper) * 100 : null;
+  const positionSide = positionAmount > 0 ? "LONG" : positionAmount < 0 ? "SHORT" : null;
+  const wick = analyzeWick(current);
+  const previousWick = previous ? analyzeWick(previous) : null;
+  const strategy = Number(settings.buyStrategy);
+  const allowLong = strategy === 1 || strategy === 2 || strategy === 4;
+  const allowShort = strategy === 1 || strategy === 3 || strategy === 4;
+  const isConfirmLong = Boolean(previousWick?.hasLower && current.close > current.open);
+  const isConfirmShort = Boolean(previousWick?.hasUpper && current.close < current.open);
 
   const diagnostics = {
     price: current.close,
     candleTime: current.time,
-    rsi14,
-    previousRsi14,
-    bollinger: band,
-    middleGapPct,
-    lowerGapPct,
-    upperGapPct,
+    wick,
+    previousWick,
     positionAmount,
     entryPrice,
     checks: {
-      rsiUnder55: Boolean(rsi14 && rsi14 <= 55),
-      rsiTurningUp: Boolean(rsi14 && previousRsi14 && rsi14 >= previousRsi14),
-      middleTouch: Boolean(middleGapPct !== null && middleGapPct <= 0.3),
-      middleRecovery: Boolean(band && previous.close < band.middle && current.close >= band.middle),
+      upperWickShort: wick.hasUpper,
+      lowerWickLong: wick.hasLower,
+      confirmShort: isConfirmShort,
+      confirmLong: isConfirmLong,
     },
   };
 
   if (hasPosition && entryPrice > 0) {
-    const pnlPct = ((current.close - entryPrice) / entryPrice) * 100;
-    if (pnlPct >= settings.takeProfitPct) return { side: "SELL", reason: `take profit ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
-    if (settings.stopLossPct > 0 && pnlPct <= -settings.stopLossPct) return { side: "SELL", reason: `stop loss ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
-    return { side: "HOLD", reason: `holding position ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    const pnlPct = positionSide === "LONG" ? ((current.close - entryPrice) / entryPrice) * 100 : ((entryPrice - current.close) / entryPrice) * 100;
+    if (pnlPct >= settings.takeProfitPct) return { side: `CLOSE_${positionSide}`, reason: `take profit ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    if (settings.stopLossPct > 0 && pnlPct <= -settings.stopLossPct) return { side: `CLOSE_${positionSide}`, reason: `stop loss ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    return { side: "HOLD", reason: `holding ${positionSide} ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
   }
 
-  if (!band || !rsi14 || !previousRsi14) return { side: "WAIT", reason: "indicator data is not ready", diagnostics };
-
-  const middleGap = Math.abs(current.close - band.middle) / band.middle;
-  const isMiddleTouch = middleGap <= 0.003;
-  const isMiddleRecovery = previous.close < band.middle && current.close >= band.middle;
-  const isRsiTurning = rsi14 >= previousRsi14;
-  const scoreParts = {
-    rsi: rsi14 <= 55 ? 2 : 0,
-    rsiTurn: isRsiTurning ? 1 : 0,
-    bollingerMiddle: isMiddleTouch || isMiddleRecovery ? 2 : 0,
-  };
-  const score = scoreParts.rsi + scoreParts.rsiTurn + scoreParts.bollingerMiddle;
-  const detailDiagnostics = { ...diagnostics, scoreParts, score };
-
-  if (score >= 4) return { side: "BUY", reason: `RSI(14) ${rsi14.toFixed(1)}, Bollinger middle touch/recovery`, score, diagnostics: detailDiagnostics };
-  return { side: "WAIT", reason: `conditions not met score ${score}`, score, diagnostics: detailDiagnostics };
+  if (strategy === 4 && allowShort && isConfirmShort) return { side: "SHORT", reason: `cautious short: upper wick then bearish candle`, score: 5, diagnostics: { ...diagnostics, score: 5 } };
+  if (strategy === 4 && allowLong && isConfirmLong) return { side: "LONG", reason: `cautious long: lower wick then bullish candle`, score: 5, diagnostics: { ...diagnostics, score: 5 } };
+  if (strategy !== 4 && allowShort && wick.hasUpper) return { side: "SHORT", reason: `upper wick ${(wick.upperPct * 100).toFixed(0)}%`, score: 5, diagnostics: { ...diagnostics, score: 5 } };
+  if (strategy !== 4 && allowLong && wick.hasLower) return { side: "LONG", reason: `lower wick ${(wick.lowerPct * 100).toFixed(0)}%`, score: 5, diagnostics: { ...diagnostics, score: 5 } };
+  if (strategy === 4) return { side: "WAIT", reason: `cautious wick confirmation not met`, score: 0, diagnostics: { ...diagnostics, score: 0 } };
+  return { side: "WAIT", reason: `wick/direction filter not met upper ${(wick.upperPct * 100).toFixed(0)}%, lower ${(wick.lowerPct * 100).toFixed(0)}%`, score: 0, diagnostics: { ...diagnostics, score: 0 } };
 }
 
 async function hmacSha256(secret: string, payload: string) {
@@ -176,10 +178,10 @@ function normalizeSettings(row: Record<string, unknown> | null, fallback: Record
     enabled: Boolean(row?.enabled ?? fallback.enabled ?? true),
     symbol: String(row?.symbol ?? fallback.symbol ?? "BTCUSDT"),
     interval: String(row?.interval ?? fallback.interval ?? "15m"),
-    buyStrategy: Number(row?.buy_strategy ?? fallback.buyStrategy ?? 2),
+    buyStrategy: Number(row?.buy_strategy ?? fallback.buyStrategy ?? 1),
     leverage: Number(row?.leverage ?? fallback.leverage ?? 1),
-    takeProfitPct: Number(row?.take_profit_pct ?? fallback.takeProfitPct ?? 1),
-    stopLossPct: Number(row?.stop_loss_pct ?? fallback.stopLossPct ?? 1),
+    takeProfitPct: Number(row?.take_profit_pct ?? fallback.takeProfitPct ?? 0.2),
+    stopLossPct: Number(row?.stop_loss_pct ?? fallback.stopLossPct ?? 0.2),
   };
 }
 
@@ -220,6 +222,40 @@ async function getRecentEvents(supabase: ReturnType<typeof createClient>) {
   return data ?? [];
 }
 
+function buildMetrics(events: Array<Record<string, unknown>>, position: Record<string, unknown> | null) {
+  const pnlEvents = events
+    .map((event) => {
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const decision = payload?.decision as Record<string, unknown> | undefined;
+      return Number(decision?.pnlPct);
+    })
+    .filter((value) => Number.isFinite(value));
+  const closedPnlEvents = events
+    .map((event) => {
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const decision = payload?.decision as Record<string, unknown> | undefined;
+      return String(decision?.side ?? "").startsWith("CLOSE") ? Number(decision.pnlPct) : null;
+    })
+    .filter((value): value is number => Number.isFinite(value));
+  const unrealizedProfit = Number(position?.unRealizedProfit ?? position?.unrealizedProfit ?? 0);
+  const currentReturnPct = BOT_MARGIN_USDT ? (unrealizedProfit / BOT_MARGIN_USDT) * 100 : 0;
+  const wins = closedPnlEvents.filter((value) => value > 0).length;
+  const losses = closedPnlEvents.filter((value) => value < 0).length;
+
+  return {
+    marginUsdt: BOT_MARGIN_USDT,
+    finalEquityUsdt: BOT_MARGIN_USDT + unrealizedProfit,
+    totalReturnPct: currentReturnPct,
+    maxDrawdownPct: pnlEvents.length ? Math.min(0, ...pnlEvents) : 0,
+    winRatePct: wins + losses ? (wins / (wins + losses)) * 100 : null,
+    wins,
+    losses,
+    positionAmount: Number(position?.positionAmt ?? 0),
+    entryPrice: Number(position?.entryPrice ?? 0),
+    unrealizedProfit,
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS_HEADERS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -238,7 +274,14 @@ Deno.serve(async (req) => {
 
     if (action === "events") {
       const events = await getRecentEvents(supabase);
-      return json({ ok: true, dryRun: DRY_RUN, settings, events });
+      let position = null;
+      try {
+        const positions = await binanceSigned("GET", "/fapi/v2/positionRisk", { symbol: settings.symbol });
+        position = Array.isArray(positions) ? positions[0] : positions;
+      } catch (_) {
+        position = null;
+      }
+      return json({ ok: true, dryRun: DRY_RUN, settings, events, metrics: buildMetrics(events, position) });
     }
 
     const { data: run } = await supabase
@@ -296,15 +339,17 @@ Deno.serve(async (req) => {
     const decision = buildDecision(candles, settings, positionAmount, entryPrice);
 
     let order = null;
-    if (action === "run-once" && decision.side === "BUY") {
+    if (action === "run-once" && (decision.side === "LONG" || decision.side === "SHORT")) {
       const quantity = quantityFrom(latest.close, settings.leverage);
       await binanceSigned("POST", "/fapi/v1/leverage", { symbol: settings.symbol, leverage: settings.leverage });
-      order = DRY_RUN ? { dryRun: true, side: "BUY", type: "MARKET", quantity } : await binanceSigned("POST", "/fapi/v1/order", { symbol: settings.symbol, side: "BUY", type: "MARKET", quantity });
+      const orderSide = decision.side === "LONG" ? "BUY" : "SELL";
+      order = DRY_RUN ? { dryRun: true, side: orderSide, strategySide: decision.side, type: "MARKET", quantity } : await binanceSigned("POST", "/fapi/v1/order", { symbol: settings.symbol, side: orderSide, type: "MARKET", quantity });
     }
 
-    if (action === "run-once" && decision.side === "SELL" && Math.abs(positionAmount) > 0) {
+    if (action === "run-once" && decision.side.startsWith("CLOSE") && Math.abs(positionAmount) > 0) {
       const quantity = Math.abs(positionAmount).toFixed(3);
-      order = DRY_RUN ? { dryRun: true, side: "SELL", type: "MARKET", quantity } : await binanceSigned("POST", "/fapi/v1/order", { symbol: settings.symbol, side: "SELL", type: "MARKET", quantity, reduceOnly: "true" });
+      const orderSide = decision.side === "CLOSE_LONG" ? "SELL" : "BUY";
+      order = DRY_RUN ? { dryRun: true, side: orderSide, strategySide: decision.side, type: "MARKET", quantity } : await binanceSigned("POST", "/fapi/v1/order", { symbol: settings.symbol, side: orderSide, type: "MARKET", quantity, reduceOnly: "true" });
     }
 
     await supabase.from("bot_events").insert({

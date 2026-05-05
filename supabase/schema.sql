@@ -31,10 +31,10 @@ create table if not exists public.bot_settings (
   enabled boolean not null default true,
   symbol text not null default 'BTCUSDT',
   interval text not null default '15m',
-  buy_strategy integer not null default 2,
+  buy_strategy integer not null default 1,
   leverage integer not null default 1,
-  take_profit_pct numeric not null default 1,
-  stop_loss_pct numeric not null default 1,
+  take_profit_pct numeric not null default 0.2,
+  stop_loss_pct numeric not null default 0.2,
   updated_at timestamptz not null default now()
 );
 
@@ -53,10 +53,10 @@ values (
   true,
   'BTCUSDT',
   '15m',
-  2,
   1,
   1,
-  1
+  0.2,
+  0.2
 )
 on conflict (id) do nothing;
 
