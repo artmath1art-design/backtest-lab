@@ -314,7 +314,8 @@ select {
 
 .testnet-summary,
 .testnet-actions,
-.diagnostic-panel {
+.diagnostic-panel,
+.testnet-events-panel {
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 8px;
   background: #111820;
@@ -322,7 +323,8 @@ select {
 
 .testnet-summary,
 .testnet-actions,
-.diagnostic-panel {
+.diagnostic-panel,
+.testnet-events-panel {
   padding: 16px;
 }
 
@@ -354,6 +356,35 @@ select {
   color: #edf6ff;
   display: block;
   font-size: 15px;
+}
+
+.settings-list {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-list div {
+  align-items: center;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 6px;
+  background: #0d1218;
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.settings-list span {
+  color: #93a4b8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.settings-list strong {
+  color: #edf6ff;
+  font-size: 14px;
+  text-align: right;
 }
 
 .apply-strategy-button {
@@ -458,6 +489,10 @@ select {
   margin-top: 14px;
 }
 
+.testnet-events-panel {
+  margin-top: 14px;
+}
+
 .diagnostic-head {
   align-items: flex-start;
   display: flex;
@@ -483,6 +518,68 @@ select {
   flex: 0 0 auto;
   font-size: 18px;
   padding: 8px 10px;
+}
+
+.refresh-status-button.compact {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 12px;
+  width: auto;
+}
+
+.testnet-event-list {
+  display: grid;
+  gap: 8px;
+}
+
+.testnet-event-row {
+  align-items: center;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 6px;
+  background: #0d1218;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 86px minmax(0, 1fr);
+  min-height: 58px;
+  padding: 10px 12px;
+}
+
+.event-type {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 999px;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 900;
+  justify-self: start;
+  padding: 6px 9px;
+}
+
+.event-type.buy,
+.event-type.sell {
+  border-color: rgba(61, 220, 151, 0.34);
+  color: #b9f7d9;
+}
+
+.event-type.wait,
+.event-type.hold {
+  border-color: rgba(56, 189, 248, 0.26);
+  color: #7dd3fc;
+}
+
+.testnet-event-row strong {
+  color: #edf6ff;
+  display: block;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.testnet-event-row small {
+  color: #93a4b8;
+  display: block;
+  font-size: 12px;
+  margin-top: 4px;
 }
 
 .diagnostic-grid {

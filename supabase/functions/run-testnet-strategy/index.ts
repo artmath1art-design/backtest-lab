@@ -112,12 +112,12 @@ function buildDecision(candles: Candle[], settings: Required<BotSettings>, posit
 
   if (hasPosition && entryPrice > 0) {
     const pnlPct = ((current.close - entryPrice) / entryPrice) * 100;
-    if (pnlPct >= settings.takeProfitPct) return { side: "SELL", reason: `익절 ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
-    if (settings.stopLossPct > 0 && pnlPct <= -settings.stopLossPct) return { side: "SELL", reason: `손절 ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
-    return { side: "HOLD", reason: `포지션 유지 ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    if (pnlPct >= settings.takeProfitPct) return { side: "SELL", reason: `take profit ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    if (settings.stopLossPct > 0 && pnlPct <= -settings.stopLossPct) return { side: "SELL", reason: `stop loss ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
+    return { side: "HOLD", reason: `holding position ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
   }
 
-  if (!band || !rsi14 || !previousRsi14) return { side: "WAIT", reason: "지표 데이터 부족", diagnostics };
+  if (!band || !rsi14 || !previousRsi14) return { side: "WAIT", reason: "indicator data is not ready", diagnostics };
 
   const middleGap = Math.abs(current.close - band.middle) / band.middle;
   const isMiddleTouch = middleGap <= 0.003;
@@ -131,8 +131,8 @@ function buildDecision(candles: Candle[], settings: Required<BotSettings>, posit
   const score = scoreParts.rsi + scoreParts.rsiTurn + scoreParts.bollingerMiddle;
   const detailDiagnostics = { ...diagnostics, scoreParts, score };
 
-  if (score >= 4) return { side: "BUY", reason: `RSI(14) ${rsi14.toFixed(1)}, 볼밴 중단 근접/회복`, score, diagnostics: detailDiagnostics };
-  return { side: "WAIT", reason: `조건 미충족 score ${score}`, score, diagnostics: detailDiagnostics };
+  if (score >= 4) return { side: "BUY", reason: `RSI(14) ${rsi14.toFixed(1)}, Bollinger middle touch/recovery`, score, diagnostics: detailDiagnostics };
+  return { side: "WAIT", reason: `conditions not met score ${score}`, score, diagnostics: detailDiagnostics };
 }
 
 async function hmacSha256(secret: string, payload: string) {
@@ -210,6 +210,16 @@ async function saveStoredSettings(supabase: ReturnType<typeof createClient>, bod
   return normalizeSettings(data);
 }
 
+async function getRecentEvents(supabase: ReturnType<typeof createClient>) {
+  const { data, error } = await supabase
+    .from("bot_events")
+    .select("id,event_type,message,payload,created_at")
+    .order("created_at", { ascending: false })
+    .limit(12);
+  if (error) throw error;
+  return data ?? [];
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS_HEADERS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -225,6 +235,11 @@ Deno.serve(async (req) => {
     const settings = action === "save-settings"
       ? await saveStoredSettings(supabase, body)
       : await getStoredSettings(supabase, body);
+
+    if (action === "events") {
+      const events = await getRecentEvents(supabase);
+      return json({ ok: true, dryRun: DRY_RUN, settings, events });
+    }
 
     const { data: run } = await supabase
       .from("bot_runs")
@@ -268,7 +283,7 @@ Deno.serve(async (req) => {
         message: "Bot is disabled",
         payload: { settings, dryRun: DRY_RUN },
       });
-      return json({ ok: true, dryRun: DRY_RUN, settings, decision: { side: "DISABLED", reason: "자동운영 OFF" }, order: null });
+      return json({ ok: true, dryRun: DRY_RUN, settings, decision: { side: "DISABLED", reason: "auto trading is off" }, order: null });
     }
 
     const rows = await binancePublic("/fapi/v1/klines", { symbol: settings.symbol, interval: settings.interval, limit: 120 });

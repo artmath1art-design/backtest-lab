@@ -440,6 +440,7 @@ function TestnetPanel({ settings }) {
   const [testnetLoading, setTestnetLoading] = useState(false);
   const [testnetDetail, setTestnetDetail] = useState(null);
   const [appliedSettings, setAppliedSettings] = useState(null);
+  const [testnetEvents, setTestnetEvents] = useState([]);
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
   const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
   const canInvoke = Boolean(supabaseUrl && publishableKey);
@@ -479,6 +480,7 @@ function TestnetPanel({ settings }) {
       if (!response.ok || !data.ok) throw new Error(data.error ?? response.statusText);
       setTestnetDetail(data);
       if (data.settings) setAppliedSettings(data.settings);
+      if (data.events) setTestnetEvents(data.events);
       setTestnetStatus(action === "check" ? `연결됨: dry-run ${data.dryRun ? "ON" : "OFF"}` : action === "save-settings" ? "현재 전략이 자동운영 설정으로 저장되었습니다." : `${data.decision?.side}: ${data.decision?.reason}`);
     } catch (error) {
       setTestnetStatus(`실패: ${error.message}`);
@@ -488,7 +490,10 @@ function TestnetPanel({ settings }) {
   }
 
   useEffect(() => {
-    if (canInvoke) invokeTestnet("check", true);
+    if (canInvoke) {
+      invokeTestnet("check", true);
+      invokeTestnet("events", true);
+    }
   }, [canInvoke]);
 
   return (
@@ -508,13 +513,13 @@ function TestnetPanel({ settings }) {
       <div className="testnet-sections">
         <div className="testnet-summary testnet-section-block">
           <div className="summary-title">운영 설정</div>
-          <div className="summary-grid">
-            <span>심볼</span><strong>BTCUSDT</strong>
-            <span>봉 기준</span><strong>{settings.interval}</strong>
-            <span>매수</span><strong>{buyStrategy?.description ?? "-"}</strong>
-            <span>레버리지</span><strong>{settings.leverage}x</strong>
-            <span>익절</span><strong>{settings.takeProfitPct}%</strong>
-            <span>손절</span><strong>{stopLossLabel}</strong>
+          <div className="settings-list">
+            <div><span>심볼</span><strong>BTCUSDT</strong></div>
+            <div><span>봉 기준</span><strong>{settings.interval}</strong></div>
+            <div><span>매수</span><strong>{buyStrategy?.description ?? "-"}</strong></div>
+            <div><span>레버리지</span><strong>{settings.leverage}x</strong></div>
+            <div><span>익절</span><strong>{settings.takeProfitPct}%</strong></div>
+            <div><span>손절</span><strong>{stopLossLabel}</strong></div>
           </div>
           <button className="apply-strategy-button" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("save-settings")}>
             현재 전략 적용
@@ -580,6 +585,32 @@ function TestnetPanel({ settings }) {
           </div>
         </div>
       ) : null}
+
+      <div className="testnet-events-panel">
+        <div className="diagnostic-head">
+          <div>
+            <div className="summary-title">테스트넷 실행 내역</div>
+            <p>Supabase Cron과 수동 적용에서 발생한 최근 로그입니다.</p>
+          </div>
+          <button className="refresh-status-button compact" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("events")}>새로고침</button>
+        </div>
+        <div className="testnet-event-list">
+          {testnetEvents.length ? testnetEvents.map((event) => {
+            const decision = event.payload?.decision;
+            const order = event.payload?.order;
+            const close = event.payload?.latestClose;
+            return (
+              <div className="testnet-event-row" key={event.id}>
+                <span className={`event-type ${(decision?.side ?? event.event_type).toLowerCase()}`}>{decision?.side ?? event.event_type}</span>
+                <div>
+                  <strong>{event.message}</strong>
+                  <small>{new Date(event.created_at).toLocaleString()} · {close ? `$${formatUsd(close)}` : "가격 --"} · {order ? "주문신호 있음" : "주문 없음"}</small>
+                </div>
+              </div>
+            );
+          }) : <div className="empty-list">아직 테스트넷 실행 내역이 없습니다.</div>}
+        </div>
+      </div>
     </section>
   );
 }
