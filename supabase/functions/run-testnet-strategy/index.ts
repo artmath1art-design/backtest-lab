@@ -28,6 +28,7 @@ type BotSettings = {
   leverage?: number;
   takeProfitPct?: number;
   stopLossPct?: number;
+  enabled?: boolean;
 };
 
 function json(body: unknown, status = 200) {
@@ -170,6 +171,45 @@ function quantityFrom(price: number, leverage: number) {
   return Math.max(0.001, Math.floor(raw * 1000) / 1000).toFixed(3);
 }
 
+function normalizeSettings(row: Record<string, unknown> | null, fallback: Record<string, unknown> = {}): Required<BotSettings> {
+  return {
+    enabled: Boolean(row?.enabled ?? fallback.enabled ?? true),
+    symbol: String(row?.symbol ?? fallback.symbol ?? "BTCUSDT"),
+    interval: String(row?.interval ?? fallback.interval ?? "15m"),
+    buyStrategy: Number(row?.buy_strategy ?? fallback.buyStrategy ?? 2),
+    leverage: Number(row?.leverage ?? fallback.leverage ?? 1),
+    takeProfitPct: Number(row?.take_profit_pct ?? fallback.takeProfitPct ?? 1),
+    stopLossPct: Number(row?.stop_loss_pct ?? fallback.stopLossPct ?? 1),
+  };
+}
+
+async function getStoredSettings(supabase: ReturnType<typeof createClient>, fallback: Record<string, unknown> = {}) {
+  const { data, error } = await supabase.from("bot_settings").select("*").eq("id", "default").maybeSingle();
+  if (error) throw error;
+  return normalizeSettings(data, fallback);
+}
+
+async function saveStoredSettings(supabase: ReturnType<typeof createClient>, body: Record<string, unknown>) {
+  const settings = normalizeSettings(null, body);
+  const { data, error } = await supabase
+    .from("bot_settings")
+    .upsert({
+      id: "default",
+      enabled: settings.enabled,
+      symbol: settings.symbol,
+      interval: settings.interval,
+      buy_strategy: settings.buyStrategy,
+      leverage: settings.leverage,
+      take_profit_pct: settings.takeProfitPct,
+      stop_loss_pct: settings.stopLossPct,
+      updated_at: new Date().toISOString(),
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return normalizeSettings(data);
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS_HEADERS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -182,14 +222,9 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const action = body.action ?? "check";
-    const settings: Required<BotSettings> = {
-      symbol: body.symbol ?? "BTCUSDT",
-      interval: body.interval ?? "15m",
-      buyStrategy: Number(body.buyStrategy ?? 2),
-      leverage: Number(body.leverage ?? 1),
-      takeProfitPct: Number(body.takeProfitPct ?? 1),
-      stopLossPct: Number(body.stopLossPct ?? 1),
-    };
+    const settings = action === "save-settings"
+      ? await saveStoredSettings(supabase, body)
+      : await getStoredSettings(supabase, body);
 
     const { data: run } = await supabase
       .from("bot_runs")
@@ -205,6 +240,16 @@ Deno.serve(async (req) => {
       .select("id")
       .single();
 
+    if (action === "save-settings") {
+      await supabase.from("bot_events").insert({
+        run_id: run?.id,
+        event_type: "settings_saved",
+        message: "Bot settings saved",
+        payload: { settings },
+      });
+      return json({ ok: true, dryRun: DRY_RUN, settings });
+    }
+
     if (action === "check") {
       const balance = await binanceSigned("GET", "/fapi/v2/balance");
       await supabase.from("bot_events").insert({
@@ -213,7 +258,17 @@ Deno.serve(async (req) => {
         message: "Binance Futures Testnet connection checked",
         payload: { dryRun: DRY_RUN },
       });
-      return json({ ok: true, dryRun: DRY_RUN, balances: balance.slice?.(0, 3) ?? balance });
+      return json({ ok: true, dryRun: DRY_RUN, settings, balances: balance.slice?.(0, 3) ?? balance });
+    }
+
+    if (!settings.enabled) {
+      await supabase.from("bot_events").insert({
+        run_id: run?.id,
+        event_type: "strategy_skipped",
+        message: "Bot is disabled",
+        payload: { settings, dryRun: DRY_RUN },
+      });
+      return json({ ok: true, dryRun: DRY_RUN, settings, decision: { side: "DISABLED", reason: "자동운영 OFF" }, order: null });
     }
 
     const rows = await binancePublic("/fapi/v1/klines", { symbol: settings.symbol, interval: settings.interval, limit: 120 });
@@ -244,7 +299,7 @@ Deno.serve(async (req) => {
       payload: { settings, latestCandleTime: latest.time, latestClose: latest.close, positionAmount, entryPrice, decision, order, dryRun: DRY_RUN },
     });
 
-    return json({ ok: true, dryRun: DRY_RUN, latestClose: latest.close, positionAmount, entryPrice, decision, order });
+    return json({ ok: true, dryRun: DRY_RUN, settings, latestClose: latest.close, positionAmount, entryPrice, decision, order });
   } catch (error) {
     return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
   }

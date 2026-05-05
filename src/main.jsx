@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, BarChart3, CalendarClock, Database, Gauge, KeyRound, Play, ServerCog, ShieldAlert, Wallet } from "lucide-react";
+import { Activity, BarChart3, CalendarClock, Gauge, Play, ShieldAlert, Wallet } from "lucide-react";
 import "./styles.css";
 
 const BINANCE_BASE = "https://api.binance.com/api/v3/klines";
@@ -21,12 +21,6 @@ const BUY_STRATEGIES = [
   { value: 1, label: "1", description: "중단 풀매수" },
   { value: 2, label: "2", description: "중단/하단 반반" },
   { value: 3, label: "3", description: "중단/하단/하단-1%" },
-];
-const TESTNET_TASKS = [
-  { icon: Database, title: "Supabase 프로젝트", body: "bot_runs, bot_events 테이블 생성 후 실행 로그를 저장합니다." },
-  { icon: KeyRound, title: "시크릿 등록", body: "Binance Futures Testnet API Key/Secret은 Edge Function 환경변수로만 보관합니다." },
-  { icon: ServerCog, title: "Edge Function", body: "캔들 조회, 신호 계산, 포지션 확인, 테스트넷 주문 요청을 서버에서 처리합니다." },
-  { icon: ShieldAlert, title: "안전장치", body: "테스트넷 전용, 1캔들 1회 실행, 중복 진입 방지, 최대 포지션 1개로 제한합니다." },
 ];
 const INTERVALS = [
   { value: "1m", label: "1분봉", ms: 60_000 },
@@ -445,19 +439,24 @@ function TestnetPanel({ settings }) {
   const [testnetStatus, setTestnetStatus] = useState("Supabase URL과 Publishable key를 .env.local에 넣으면 연결 테스트를 시작할 수 있습니다.");
   const [testnetLoading, setTestnetLoading] = useState(false);
   const [testnetDetail, setTestnetDetail] = useState(null);
+  const [appliedSettings, setAppliedSettings] = useState(null);
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
   const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
   const canInvoke = Boolean(supabaseUrl && publishableKey);
   const diagnostics = testnetDetail?.decision?.diagnostics;
+  const lastDecision = testnetDetail?.decision?.side ?? "READY";
+  const statusTone = testnetStatus.startsWith("실패") ? "bad" : lastDecision === "BUY" || lastDecision === "SELL" ? "good" : "neutral";
 
-  async function invokeTestnet(action) {
+  async function invokeTestnet(action, quiet = false) {
     if (!canInvoke) {
       setTestnetStatus(".env.local에 VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY가 필요합니다.");
       return;
     }
 
     setTestnetLoading(true);
-    setTestnetStatus(action === "check" ? "Supabase Edge Function 연결 확인 중..." : "테스트넷 전략 1회 실행 중...");
+    if (!quiet) {
+      setTestnetStatus(action === "check" ? "Supabase Edge Function 연결 확인 중..." : "테스트넷 전략 1회 실행 중...");
+    }
     try {
       const response = await fetch(`${supabaseUrl}/functions/v1/run-testnet-strategy`, {
         method: "POST",
@@ -479,7 +478,8 @@ function TestnetPanel({ settings }) {
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error ?? response.statusText);
       setTestnetDetail(data);
-      setTestnetStatus(action === "check" ? `연결 확인 완료: dry-run ${data.dryRun ? "ON" : "OFF"}` : `${data.decision?.side}: ${data.decision?.reason}`);
+      if (data.settings) setAppliedSettings(data.settings);
+      setTestnetStatus(action === "check" ? `연결됨: dry-run ${data.dryRun ? "ON" : "OFF"}` : action === "save-settings" ? "현재 전략이 자동운영 설정으로 저장되었습니다." : `${data.decision?.side}: ${data.decision?.reason}`);
     } catch (error) {
       setTestnetStatus(`실패: ${error.message}`);
     } finally {
@@ -487,19 +487,27 @@ function TestnetPanel({ settings }) {
     }
   }
 
+  useEffect(() => {
+    if (canInvoke) invokeTestnet("check", true);
+  }, [canInvoke]);
+
   return (
     <section className="panel testnet-panel">
-      <div className="panel-head">
+      <div className="testnet-head">
         <div>
+          <div className="eyebrow">Binance Futures Testnet</div>
           <h2>Supabase Binance 테스트넷</h2>
-          <p>현재 백테스트 전략을 Supabase Edge Function으로 옮겨 테스트넷에서 운영하기 위한 준비 섹션입니다.</p>
+          <p>현재 선택한 백테스트 전략을 Edge Function과 Cron으로 실행합니다.</p>
         </div>
-        <div className="source-pill">Testnet Ready</div>
+        <div className={`live-badge ${statusTone}`}>
+          <span></span>
+          {testnetLoading ? "RUNNING" : lastDecision}
+        </div>
       </div>
 
-      <div className="testnet-layout">
-        <div className="testnet-summary">
-          <div className="summary-title">적용할 전략</div>
+      <div className="testnet-sections">
+        <div className="testnet-summary testnet-section-block">
+          <div className="summary-title">운영 설정</div>
           <div className="summary-grid">
             <span>심볼</span><strong>BTCUSDT</strong>
             <span>봉 기준</span><strong>{settings.interval}</strong>
@@ -508,20 +516,52 @@ function TestnetPanel({ settings }) {
             <span>익절</span><strong>{settings.takeProfitPct}%</strong>
             <span>손절</span><strong>{stopLossLabel}</strong>
           </div>
+          <button className="apply-strategy-button" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("save-settings")}>
+            현재 전략 적용
+          </button>
         </div>
 
-        <div className="testnet-actions">
-          <button type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("check")}>연결 확인</button>
-          <button type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("run-once")}>1회 실행</button>
-          <button type="button" disabled>자동 운영 시작</button>
-          <button type="button" disabled>중지</button>
-          <p>{testnetStatus}</p>
+        <div className="testnet-actions testnet-section-block">
+          <div className="summary-title">자동 운영 상태</div>
+          <div className="auto-status-grid">
+            <div>
+              <span>연결</span>
+              <strong>{canInvoke ? (testnetDetail?.ok ? "연결됨" : "확인 중") : "환경변수 필요"}</strong>
+            </div>
+            <div>
+              <span>실행 방식</span>
+              <strong>Supabase Cron</strong>
+            </div>
+            <div>
+              <span>주기</span>
+              <strong>15분마다</strong>
+            </div>
+            <div>
+              <span>주문 모드</span>
+              <strong>{testnetDetail?.dryRun ? "Dry-run" : "Testnet"}</strong>
+            </div>
+            <div>
+              <span>적용 전략</span>
+              <strong>{appliedSettings ? `${appliedSettings.interval} · ${appliedSettings.leverage}x` : "확인 전"}</strong>
+            </div>
+          </div>
+          <div className={`status-box ${statusTone}`}>
+            <strong>{testnetLoading ? "처리 중" : "상태"}</strong>
+            <span>{testnetStatus}</span>
+          </div>
+          <button className="refresh-status-button" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("check")}>상태 갱신</button>
         </div>
       </div>
 
       {diagnostics ? (
         <div className="diagnostic-panel">
-          <div className="summary-title">마지막 신호 상세</div>
+          <div className="diagnostic-head">
+            <div>
+              <div className="summary-title">마지막 신호 상세</div>
+              <p>{testnetDetail?.decision?.reason}</p>
+            </div>
+            <strong>{diagnostics.score ?? "--"} / 5</strong>
+          </div>
           <div className="diagnostic-grid">
             <span>현재가</span><strong>${formatUsd(diagnostics.price)}</strong>
             <span>RSI(14)</span><strong>{diagnostics.rsi14?.toFixed?.(1) ?? "--"}</strong>
@@ -531,7 +571,7 @@ function TestnetPanel({ settings }) {
             <span>하단 이격</span><strong>{formatPct(diagnostics.lowerGapPct, 2)}</strong>
             <span>포지션</span><strong>{Number(diagnostics.positionAmount ?? 0).toFixed(3)} BTC</strong>
             <span>진입가</span><strong>{diagnostics.entryPrice ? `$${formatUsd(diagnostics.entryPrice)}` : "--"}</strong>
-            <span>점수</span><strong>{diagnostics.score ?? "--"} / 5</strong>
+            <span>Dry-run</span><strong>{testnetDetail?.dryRun ? "ON" : "OFF"}</strong>
           </div>
           <div className="check-grid">
             <div className={diagnostics.checks?.rsiUnder55 ? "pass" : ""}>RSI 55 이하 <strong>{diagnostics.scoreParts?.rsi ?? 0}점</strong></div>
@@ -540,18 +580,6 @@ function TestnetPanel({ settings }) {
           </div>
         </div>
       ) : null}
-
-      <div className="testnet-tasks">
-        {TESTNET_TASKS.map(({ icon: Icon, title, body }) => (
-          <div className="testnet-task" key={title}>
-            <Icon size={18} />
-            <div>
-              <strong>{title}</strong>
-              <span>{body}</span>
-            </div>
-          </div>
-        ))}
-      </div>
     </section>
   );
 }

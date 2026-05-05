@@ -25,3 +25,39 @@ create table if not exists public.bot_events (
 
 alter table public.bot_runs enable row level security;
 alter table public.bot_events enable row level security;
+
+create table if not exists public.bot_settings (
+  id text primary key default 'default',
+  enabled boolean not null default true,
+  symbol text not null default 'BTCUSDT',
+  interval text not null default '15m',
+  buy_strategy integer not null default 2,
+  leverage integer not null default 1,
+  take_profit_pct numeric not null default 1,
+  stop_loss_pct numeric not null default 1,
+  updated_at timestamptz not null default now()
+);
+
+insert into public.bot_settings (
+  id,
+  enabled,
+  symbol,
+  interval,
+  buy_strategy,
+  leverage,
+  take_profit_pct,
+  stop_loss_pct
+)
+values (
+  'default',
+  true,
+  'BTCUSDT',
+  '15m',
+  2,
+  1,
+  1,
+  1
+)
+on conflict (id) do nothing;
+
+alter table public.bot_settings enable row level security;
