@@ -548,7 +548,7 @@ select {
   align-items: center;
   display: grid;
   gap: 10px;
-  grid-template-columns: 92px 1.25fr 0.75fr 1.1fr;
+  grid-template-columns: 20px 0.9fr 1.1fr 1.35fr;
   min-height: 46px;
   padding: 10px 0;
 }
@@ -557,37 +557,36 @@ select {
   border-top: 1px solid rgba(148, 163, 184, 0.09);
 }
 
-.event-type {
-  border: 1px solid rgba(148, 163, 184, 0.18);
+.event-dot {
+  border: 1px solid rgba(148, 163, 184, 0.26);
   border-radius: 999px;
-  color: #cbd5e1;
-  font-size: 11px;
-  font-weight: 900;
   justify-self: start;
-  padding: 6px 9px;
+  height: 10px;
+  width: 10px;
 }
 
-.event-type.buy,
-.event-type.long,
-.event-type.sell {
-  border-color: rgba(61, 220, 151, 0.34);
-  color: #b9f7d9;
+.event-dot.long {
+  background: #3ddc97;
+  border-color: #3ddc97;
 }
 
-.event-type.short,
-.event-type.close_long,
-.event-type.close_short {
-  border-color: rgba(255, 107, 122, 0.34);
-  color: #fecdd3;
+.event-dot.short {
+  background: #ff6b7a;
+  border-color: #ff6b7a;
 }
 
-.event-type.wait,
-.event-type.hold {
-  border-color: rgba(56, 189, 248, 0.26);
-  color: #7dd3fc;
+.event-dot.close_long,
+.event-dot.close_short {
+  background: #fbbf24;
+  border-color: #fbbf24;
 }
 
-.testnet-event-row span:not(.event-type) {
+.event-dot.error {
+  background: #ff6b7a;
+  border-color: #ff6b7a;
+}
+
+.testnet-event-row span:not(.event-dot) {
   color: #cbd5e1;
   font-size: 13px;
   overflow: hidden;

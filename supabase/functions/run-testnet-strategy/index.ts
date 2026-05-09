@@ -10,7 +10,14 @@ const BINANCE_BASE_URL = Deno.env.get("BINANCE_FUTURES_BASE_URL") ?? "https://te
 const BINANCE_API_KEY = Deno.env.get("BINANCE_TESTNET_API_KEY") ?? "";
 const BINANCE_SECRET_KEY = Deno.env.get("BINANCE_TESTNET_SECRET_KEY") ?? "";
 const DRY_RUN = (Deno.env.get("BINANCE_DRY_RUN") ?? "true").toLowerCase() !== "false";
-const BOT_MARGIN_USDT = Number(Deno.env.get("BOT_MARGIN_USDT") ?? "10");
+const BOT_MARGIN_USDT = parseNumberSecret(Deno.env.get("BOT_MARGIN_USDT"), 10);
+
+function parseNumberSecret(value: string | undefined, fallback: number) {
+  if (!value) return fallback;
+  const normalized = value.includes("=") ? value.split("=").at(-1) : value;
+  const number = Number(normalized);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
 
 type Candle = {
   time: number;
@@ -171,6 +178,7 @@ async function binanceSigned(method: "GET" | "POST", path: string, params: Recor
 }
 
 function quantityFrom(price: number, leverage: number) {
+  if (!Number.isFinite(price) || price <= 0) return "0.001";
   const raw = (BOT_MARGIN_USDT * leverage) / price;
   return Math.max(0.001, Math.floor(raw * 1000) / 1000).toFixed(3);
 }
@@ -266,6 +274,7 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
+  let runId: string | null = null;
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -299,6 +308,7 @@ Deno.serve(async (req) => {
       })
       .select("id")
       .single();
+    runId = run?.id ?? null;
 
     if (action === "save-settings") {
       await supabase.from("bot_events").insert({
@@ -363,6 +373,17 @@ Deno.serve(async (req) => {
 
     return json({ ok: true, dryRun: DRY_RUN, settings, latestClose: latest.close, positionAmount, entryPrice, decision, order });
   } catch (error) {
-    return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await supabase.from("bot_events").insert({
+        run_id: runId,
+        event_type: "order_error",
+        message,
+        payload: { error: message, dryRun: DRY_RUN },
+      });
+    } catch (_) {
+      // Ignore logging failures so the original error can be returned.
+    }
+    return json({ ok: false, error: message }, 500);
   }
 });

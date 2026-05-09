@@ -419,9 +419,10 @@ function TestnetPanel({ settings }) {
   const canInvoke = Boolean(supabaseUrl && publishableKey);
   const diagnostics = testnetDetail?.decision?.diagnostics;
   const testnetMetrics = testnetDetail?.metrics;
+  const latestRunEvent = testnetEvents.find((event) => event.event_type === "strategy_run");
   const tradeEvents = testnetEvents.filter((event) => {
     const side = event.payload?.decision?.side;
-    return ["LONG", "SHORT", "CLOSE_LONG", "CLOSE_SHORT"].includes(side);
+    return event.event_type === "order_error" || ["LONG", "SHORT", "CLOSE_LONG", "CLOSE_SHORT"].includes(side);
   });
   const lastDecision = testnetDetail?.decision?.side ?? "READY";
   const statusTone = testnetStatus.startsWith("실패") ? "bad" : lastDecision === "BUY" || lastDecision === "SELL" ? "good" : "neutral";
@@ -525,7 +526,7 @@ function TestnetPanel({ settings }) {
             </div>
             <div>
               <span>주기</span>
-              <strong>15분마다</strong>
+              <strong>1분마다</strong>
             </div>
             <div>
               <span>주문 모드</span>
@@ -534,6 +535,10 @@ function TestnetPanel({ settings }) {
             <div>
               <span>적용 전략</span>
               <strong>{appliedSettings ? `${appliedSettings.interval} · ${appliedSettings.leverage}x` : "확인 전"}</strong>
+            </div>
+            <div>
+              <span>최근 실행</span>
+              <strong>{latestRunEvent ? new Date(latestRunEvent.created_at).toLocaleTimeString() : "대기 중"}</strong>
             </div>
           </div>
           <div className={`status-box ${statusTone}`}>
@@ -597,13 +602,18 @@ function TestnetPanel({ settings }) {
           {tradeEvents.length ? tradeEvents.map((event) => {
             const decision = event.payload?.decision;
             const order = event.payload?.order;
-            const sideLabel = decision?.side === "LONG" ? "롱 진입" : decision?.side === "SHORT" ? "숏 진입" : decision?.side === "CLOSE_LONG" ? "롱 청산" : "숏 청산";
+            const sideLabel = event.event_type === "order_error" ? "주문 실패" : decision?.side === "LONG" ? "롱 진입" : decision?.side === "SHORT" ? "숏 진입" : decision?.side === "CLOSE_LONG" ? "롱 청산" : "숏 청산";
+            const dotClass = event.event_type === "order_error" ? "error" : (decision?.side ?? "").toLowerCase();
+            const quantity = Number(order?.origQty ?? order?.quantity ?? 0);
+            const referencePrice = Number(order?.avgPrice && Number(order.avgPrice) > 0 ? order.avgPrice : event.payload?.latestClose ?? decision?.diagnostics?.price ?? 0);
+            const notional = quantity && referencePrice ? quantity * referencePrice : null;
+            const priceLabel = decision?.side?.startsWith("CLOSE") ? "청산가" : "진입가";
             return (
               <div className="testnet-event-row" key={event.id}>
-                <span className={`event-type ${(decision?.side ?? "").toLowerCase()}`}>{sideLabel}</span>
+                <span className={`event-dot ${dotClass}`} title={sideLabel} aria-label={sideLabel}></span>
+                <span>{notional ? `$${formatUsd(notional)}` : "-- USDT"}</span>
+                <span>{referencePrice ? `${priceLabel} $${formatUsd(referencePrice)}` : `${priceLabel} --`}</span>
                 <span>{new Date(event.created_at).toLocaleString()}</span>
-                <span>{order ? "주문 요청" : "신호 발생"}</span>
-                <span>{decision?.reason ?? "--"}</span>
               </div>
             );
           }) : <div className="empty-list">아직 매매 신호가 없습니다.</div>}
