@@ -124,11 +124,13 @@ function buildDecision(candles: Candle[], settings: Required<BotSettings>, posit
 
   if (hasPosition && entryPrice > 0) {
     const pnlPct = positionSide === "LONG" ? ((current.close - entryPrice) / entryPrice) * 100 : ((entryPrice - current.close) / entryPrice) * 100;
+    if (strategy === 5) return { side: `CLOSE_${positionSide}`, reason: `one minute test close ${positionSide}`, pnlPct, diagnostics };
     if (pnlPct >= settings.takeProfitPct) return { side: `CLOSE_${positionSide}`, reason: `take profit ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
     if (settings.stopLossPct > 0 && pnlPct <= -settings.stopLossPct) return { side: `CLOSE_${positionSide}`, reason: `stop loss ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
     return { side: "HOLD", reason: `holding ${positionSide} ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics };
   }
 
+  if (strategy === 5) return { side: "LONG", reason: "one minute test long entry", score: 5, diagnostics: { ...diagnostics, score: 5 } };
   if (strategy === 4 && allowShort && isConfirmShort) return { side: "SHORT", reason: `cautious short: upper wick then bearish candle`, score: 5, diagnostics: { ...diagnostics, score: 5 } };
   if (strategy === 4 && allowLong && isConfirmLong) return { side: "LONG", reason: `cautious long: lower wick then bullish candle`, score: 5, diagnostics: { ...diagnostics, score: 5 } };
   if (strategy !== 4 && allowShort && wick.hasUpper) return { side: "SHORT", reason: `upper wick ${(wick.upperPct * 100).toFixed(0)}%`, score: 5, diagnostics: { ...diagnostics, score: 5 } };

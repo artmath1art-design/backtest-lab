@@ -540,20 +540,21 @@ select {
 }
 
 .testnet-event-list {
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
   display: grid;
-  gap: 8px;
 }
 
 .testnet-event-row {
   align-items: center;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 6px;
-  background: #0d1218;
   display: grid;
-  gap: 12px;
-  grid-template-columns: 86px minmax(0, 1fr);
-  min-height: 58px;
-  padding: 10px 12px;
+  gap: 10px;
+  grid-template-columns: 92px 1.25fr 0.75fr 1.1fr;
+  min-height: 46px;
+  padding: 10px 0;
+}
+
+.testnet-event-row + .testnet-event-row {
+  border-top: 1px solid rgba(148, 163, 184, 0.09);
 }
 
 .event-type {
@@ -586,20 +587,16 @@ select {
   color: #7dd3fc;
 }
 
-.testnet-event-row strong {
-  color: #edf6ff;
-  display: block;
+.testnet-event-row span:not(.event-type) {
+  color: #cbd5e1;
   font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.testnet-event-row small {
+.testnet-event-row span:nth-child(2) {
   color: #93a4b8;
-  display: block;
-  font-size: 12px;
-  margin-top: 4px;
 }
 
 .diagnostic-grid {

@@ -21,6 +21,7 @@ const BUY_STRATEGIES = [
   { value: 2, label: "롱만", description: "아랫꼬리 롱만" },
   { value: 3, label: "숏만", description: "윗꼬리 숏만" },
   { value: 4, label: "신중", description: "꼬리 후 다음봉 확인" },
+  { value: 5, label: "1분 테스트", description: "실행마다 매수/청산 반복" },
 ];
 const INTERVALS = [
   { value: "1m", label: "1분봉", ms: 60_000 },
@@ -207,11 +208,15 @@ function buildGagokDecision({ candles, index, entryPrice, positionSide, buyStrat
 
   if (entryPrice && positionSide) {
     const pnl = positionSide === "LONG" ? ((price - entryPrice) / entryPrice) * 100 : ((entryPrice - price) / entryPrice) * 100;
+    if (strategy === 5) return { side: `CLOSE_${positionSide}`, score: 5, reason: "1분 테스트 청산" };
     if (pnl >= Number(takeProfitPct)) return { side: `CLOSE_${positionSide}`, score: 5, reason: `익절 ${pnl.toFixed(2)}%` };
     if (Number(stopLossPct) > 0 && pnl <= -Number(stopLossPct)) return { side: `CLOSE_${positionSide}`, score: 5, reason: `손절 ${pnl.toFixed(2)}%` };
     return { side: "HOLD", score: 0, reason: `${positionSide} 보유 ${pnl.toFixed(2)}%` };
   }
 
+  if (strategy === 5) {
+    return { side: "LONG", score: 5, reason: "1분 테스트 롱 진입" };
+  }
   if (strategy === 4 && allowShort && isConfirmShort) {
     return { side: "SHORT", score: 5, reason: `신중 숏: 직전 윗꼬리 후 음봉 확인` };
   }
@@ -414,6 +419,10 @@ function TestnetPanel({ settings }) {
   const canInvoke = Boolean(supabaseUrl && publishableKey);
   const diagnostics = testnetDetail?.decision?.diagnostics;
   const testnetMetrics = testnetDetail?.metrics;
+  const tradeEvents = testnetEvents.filter((event) => {
+    const side = event.payload?.decision?.side;
+    return ["LONG", "SHORT", "CLOSE_LONG", "CLOSE_SHORT"].includes(side);
+  });
   const lastDecision = testnetDetail?.decision?.side ?? "READY";
   const statusTone = testnetStatus.startsWith("실패") ? "bad" : lastDecision === "BUY" || lastDecision === "SELL" ? "good" : "neutral";
 
@@ -577,20 +586,19 @@ function TestnetPanel({ settings }) {
           <button className="refresh-status-button compact" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("events")}>새로고침</button>
         </div>
         <div className="testnet-event-list">
-          {testnetEvents.length ? testnetEvents.map((event) => {
+          {tradeEvents.length ? tradeEvents.map((event) => {
             const decision = event.payload?.decision;
             const order = event.payload?.order;
-            const close = event.payload?.latestClose;
+            const sideLabel = decision?.side === "LONG" ? "롱 진입" : decision?.side === "SHORT" ? "숏 진입" : decision?.side === "CLOSE_LONG" ? "롱 청산" : "숏 청산";
             return (
               <div className="testnet-event-row" key={event.id}>
-                <span className={`event-type ${(decision?.side ?? event.event_type).toLowerCase()}`}>{decision?.side ?? event.event_type}</span>
-                <div>
-                  <strong>{event.message}</strong>
-                  <small>{new Date(event.created_at).toLocaleString()} · {close ? `$${formatUsd(close)}` : "가격 --"} · {order ? "주문신호 있음" : "주문 없음"}</small>
-                </div>
+                <span className={`event-type ${(decision?.side ?? "").toLowerCase()}`}>{sideLabel}</span>
+                <span>{new Date(event.created_at).toLocaleString()}</span>
+                <span>{order ? "주문 요청" : "신호 발생"}</span>
+                <span>{decision?.reason ?? "--"}</span>
               </div>
             );
-          }) : <div className="empty-list">아직 테스트넷 실행 내역이 없습니다.</div>}
+          }) : <div className="empty-list">아직 매매 신호가 없습니다.</div>}
         </div>
       </div>
     </section>
