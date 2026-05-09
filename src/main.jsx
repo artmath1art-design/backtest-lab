@@ -432,7 +432,7 @@ function TestnetPanel({ settings }) {
       return;
     }
 
-    setTestnetLoading(true);
+    if (!quiet) setTestnetLoading(true);
     if (!quiet) {
       setTestnetStatus(action === "check" ? "Supabase Edge Function 연결 확인 중..." : "테스트넷 전략 1회 실행 중...");
     }
@@ -461,9 +461,9 @@ function TestnetPanel({ settings }) {
       if (data.events) setTestnetEvents(data.events);
       setTestnetStatus(action === "check" ? `연결됨: dry-run ${data.dryRun ? "ON" : "OFF"}` : action === "save-settings" ? "현재 전략이 자동운영 설정으로 저장되었습니다." : `${data.decision?.side}: ${data.decision?.reason}`);
     } catch (error) {
-      setTestnetStatus(`실패: ${error.message}`);
+      if (!quiet) setTestnetStatus(`실패: ${error.message}`);
     } finally {
-      setTestnetLoading(false);
+      if (!quiet) setTestnetLoading(false);
     }
   }
 
@@ -472,6 +472,14 @@ function TestnetPanel({ settings }) {
       invokeTestnet("check", true);
       invokeTestnet("events", true);
     }
+  }, [canInvoke]);
+
+  useEffect(() => {
+    if (!canInvoke) return undefined;
+    const timer = window.setInterval(() => {
+      invokeTestnet("events", true);
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, [canInvoke]);
 
   return (
@@ -581,7 +589,7 @@ function TestnetPanel({ settings }) {
         <div className="diagnostic-head">
           <div>
             <div className="summary-title">테스트넷 실행 내역</div>
-            <p>Supabase Cron과 수동 적용에서 발생한 최근 로그입니다.</p>
+            <p>최근 매매 신호를 5초마다 자동 갱신합니다.</p>
           </div>
           <button className="refresh-status-button compact" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("events")}>새로고침</button>
         </div>
