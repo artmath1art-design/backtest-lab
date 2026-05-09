@@ -11,6 +11,7 @@ const BINANCE_API_KEY = Deno.env.get("BINANCE_TESTNET_API_KEY") ?? "";
 const BINANCE_SECRET_KEY = Deno.env.get("BINANCE_TESTNET_SECRET_KEY") ?? "";
 const DRY_RUN = (Deno.env.get("BINANCE_DRY_RUN") ?? "true").toLowerCase() !== "false";
 const BOT_MARGIN_USDT = parseNumberSecret(Deno.env.get("BOT_MARGIN_USDT"), 10);
+const DEFAULT_SYMBOL = "ONDOUSDT";
 
 function parseNumberSecret(value: string | undefined, fallback: number) {
   if (!value) return fallback;
@@ -70,6 +71,94 @@ function bollinger(values: number[], period = 20, multiplier = 2) {
   return { middle, upper: middle + deviation * multiplier, lower: middle - deviation * multiplier };
 }
 
+function ema(values: number[], period: number) {
+  if (!values.length) return [];
+  const multiplier = 2 / (period + 1);
+  const output: number[] = [];
+  let previous = values[0];
+  values.forEach((value, index) => {
+    previous = index === 0 ? value : value * multiplier + previous * (1 - multiplier);
+    output.push(previous);
+  });
+  return output;
+}
+
+function emaBollinger(values: number[], period = 20, multiplier = 2) {
+  if (values.length < period) return null;
+  const middle = ema(values, period).at(-1)!;
+  const slice = values.slice(-period);
+  const deviation = standardDeviation(slice);
+  return { middle, upper: middle + deviation * multiplier, lower: middle - deviation * multiplier };
+}
+
+function atr(candles: Candle[], period = 10) {
+  return candles.map((candle, index) => {
+    if (index === 0 || index + 1 < period) return null;
+    const slice = candles.slice(index + 1 - period, index + 1);
+    const ranges = slice.map((item, itemIndex) => {
+      const previous = candles[index + 1 - period + itemIndex - 1];
+      if (!previous) return item.high - item.low;
+      return Math.max(item.high - item.low, Math.abs(item.high - previous.close), Math.abs(item.low - previous.close));
+    });
+    return ranges.reduce((sum, value) => sum + value, 0) / period;
+  });
+}
+
+function supertrend(candles: Candle[], period = 10, multiplier = 3) {
+  const atrValues = atr(candles, period);
+  const output: Array<null | { direction: "UP" | "DOWN"; line: number; upper: number; lower: number }> = [];
+  let finalUpper: number | null = null;
+  let finalLower: number | null = null;
+  let direction: "UP" | "DOWN" = "UP";
+
+  candles.forEach((candle, index) => {
+    const atrValue = atrValues[index];
+    if (!atrValue) {
+      output.push(null);
+      return;
+    }
+    const hl2 = (candle.high + candle.low) / 2;
+    const basicUpper = hl2 + multiplier * atrValue;
+    const basicLower = hl2 - multiplier * atrValue;
+    const previousClose = candles[index - 1]?.close ?? candle.close;
+    const previousUpper = finalUpper ?? basicUpper;
+    const previousLower = finalLower ?? basicLower;
+
+    finalUpper = basicUpper < previousUpper || previousClose > previousUpper ? basicUpper : previousUpper;
+    finalLower = basicLower > previousLower || previousClose < previousLower ? basicLower : previousLower;
+
+    if (direction === "DOWN" && candle.close > finalUpper) direction = "UP";
+    else if (direction === "UP" && candle.close < finalLower) direction = "DOWN";
+
+    output.push({ direction, line: direction === "UP" ? finalLower : finalUpper, upper: finalUpper, lower: finalLower });
+  });
+
+  return output;
+}
+
+function vaObv(candles: Candle[], signalPeriod = 20, lookback = 20) {
+  let value = 0;
+  const series = candles.map((candle, index) => {
+    if (index === 0) return 0;
+    const previous = candles[index - 1];
+    const change = candle.close - previous.close;
+    const trueRange = Math.max(candle.high - candle.low, Math.abs(candle.high - previous.close), Math.abs(candle.low - previous.close), 0.00000001);
+    const volatilityWeight = Math.min(2, Math.abs(change) / trueRange);
+    value += Math.sign(change) * candle.volume * volatilityWeight;
+    return value;
+  });
+  const signal = ema(series, signalPeriod);
+  return series.map((item, index) => {
+    const previousWindow = series.slice(Math.max(0, index - lookback), index);
+    return {
+      value: item,
+      signal: signal[index],
+      previousHigh: previousWindow.length ? Math.max(...previousWindow) : item,
+      previousLow: previousWindow.length ? Math.min(...previousWindow) : item,
+    };
+  });
+}
+
 function rsi(values: number[], period = 14) {
   if (values.length < period + 1) return null;
   let gains = 0;
@@ -101,7 +190,148 @@ function analyzeWick(candle: Candle) {
   return { range, body, upper, lower, rangePct, upperPct, lowerPct, hasUpper, hasLower };
 }
 
-function buildDecision(candles: Candle[], settings: Required<BotSettings>, positionAmount: number, entryPrice: number) {
+function buildTrendVolumeDecision(
+  candles: Candle[],
+  settings: Required<BotSettings>,
+  positionSide: "LONG" | "SHORT" | null,
+  entryPrice: number,
+  partialTaken: boolean,
+  diagnostics: Record<string, unknown>,
+  longOnly = false,
+) {
+  const closedCandles = candles.slice(0, -1);
+  const current = closedCandles.at(-1) ?? candles.at(-1)!;
+  const previous = closedCandles.at(-2);
+  const closes = closedCandles.map((item) => item.close);
+  const bands = emaBollinger(closes, 20, 2);
+  const trendSeries = supertrend(closedCandles, 10, 3);
+  const trend = trendSeries.at(-1);
+  const flow = vaObv(closedCandles, 20, 20).at(-1);
+  const previousBands = emaBollinger(closes.slice(0, -1), 20, 2);
+  const trendDiagnostics = { ...diagnostics, bands, trend, vaObv: flow, partialTaken };
+
+  if (!bands || !trend || !flow) {
+    return { side: "WAIT", reason: "trend-volume indicators warming up", score: 0, diagnostics: { ...trendDiagnostics, score: 0 } };
+  }
+
+  const longEnergy = flow.value > flow.signal || flow.value > flow.previousHigh;
+  const shortEnergy = flow.value < flow.signal || flow.value < flow.previousLow;
+  const longPrice = current.close > bands.middle;
+  const shortPrice = current.close < bands.middle;
+  const crossedUp = Boolean(previous && previousBands && previous.close <= previousBands.middle && current.close > bands.middle);
+  const crossedDown = Boolean(previous && previousBands && previous.close >= previousBands.middle && current.close < bands.middle);
+
+  if (positionSide && entryPrice > 0) {
+    const pnlPct = positionSide === "LONG" ? ((current.close - entryPrice) / entryPrice) * 100 : ((entryPrice - current.close) / entryPrice) * 100;
+    if (positionSide === "LONG") {
+      if (!partialTaken && current.close >= bands.upper) return { side: "TRIM_LONG", reason: "first take profit: upper Bollinger touch, reduce 50%", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
+      if (trend.direction === "DOWN") return { side: "CLOSE_LONG", reason: "second exit: SuperTrend flipped bearish", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
+      if (current.close < trend.line || current.close < bands.lower) return { side: "CLOSE_LONG", reason: "stop loss: broke SuperTrend line or lower Bollinger", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
+      return { side: "HOLD", reason: `holding trend-volume LONG ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics: { ...trendDiagnostics, score: 0 } };
+    }
+
+    if (!partialTaken && current.close <= bands.lower) return { side: "TRIM_SHORT", reason: "first take profit: lower Bollinger touch, reduce 50%", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
+    if (trend.direction === "UP") return { side: "CLOSE_SHORT", reason: "second exit: SuperTrend flipped bullish", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
+    if (current.close > trend.line || current.close > bands.upper) return { side: "CLOSE_SHORT", reason: "stop loss: broke SuperTrend line or upper Bollinger", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
+    return { side: "HOLD", reason: `holding trend-volume SHORT ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics: { ...trendDiagnostics, score: 0 } };
+  }
+
+  if (trend.direction === "UP" && longEnergy && longPrice) {
+    return { side: "LONG", reason: crossedUp ? "SuperTrend bullish + VA-OBV breakout + EMA20 cross" : "SuperTrend bullish + VA-OBV strong + above EMA20", score: 5, diagnostics: { ...trendDiagnostics, score: 5 } };
+  }
+  if (!longOnly && trend.direction === "DOWN" && shortEnergy && shortPrice) {
+    return { side: "SHORT", reason: crossedDown ? "SuperTrend bearish + VA-OBV breakdown + EMA20 cross" : "SuperTrend bearish + VA-OBV weak + below EMA20", score: 5, diagnostics: { ...trendDiagnostics, score: 5 } };
+  }
+
+  return { side: "WAIT", reason: `${longOnly ? "VA long-only" : "trend-volume"} conditions not met: ST ${trend.direction}, VA ${flow.value > flow.signal ? "strong" : "weak"}, EMA ${current.close > bands.middle ? "above" : "below"}`, score: 0, diagnostics: { ...trendDiagnostics, score: 0 } };
+}
+
+function buildWickSupertrendDecision(
+  candles: Candle[],
+  positionSide: "LONG" | "SHORT" | null,
+  entryPrice: number,
+  diagnostics: Record<string, unknown>,
+) {
+  const closedCandles = candles.slice(0, -1);
+  const current = closedCandles.at(-1) ?? candles.at(-1)!;
+  const wick = analyzeWick(current);
+  const trend = supertrend(closedCandles, 10, 3).at(-1);
+  const detail = { ...diagnostics, wick, trend };
+
+  if (!trend) {
+    return { side: "WAIT", reason: "SuperTrend warming up", score: 0, diagnostics: { ...detail, score: 0 } };
+  }
+
+  if (positionSide && entryPrice > 0) {
+    const stopDistance = Math.abs(entryPrice - trend.line);
+    const safeDistance = stopDistance > entryPrice * 0.0005 ? stopDistance : entryPrice * 0.002;
+    const longTarget = entryPrice + safeDistance * 1.5;
+    const shortTarget = entryPrice - safeDistance * 1.5;
+    const pnlPct = positionSide === "LONG" ? ((current.close - entryPrice) / entryPrice) * 100 : ((entryPrice - current.close) / entryPrice) * 100;
+
+    if (positionSide === "LONG") {
+      if (current.close >= longTarget) return { side: "CLOSE_LONG", reason: "take profit: 1.5R from SuperTrend stop distance", pnlPct, diagnostics: { ...detail, score: 5 } };
+      if (current.close <= trend.line || trend.direction === "DOWN") return { side: "CLOSE_LONG", reason: "stop loss: broke SuperTrend line or flipped bearish", pnlPct, diagnostics: { ...detail, score: 5 } };
+      return { side: "HOLD", reason: `holding wick-ST LONG ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics: { ...detail, score: 0 } };
+    }
+
+    if (current.close <= shortTarget) return { side: "CLOSE_SHORT", reason: "take profit: 1.5R from SuperTrend stop distance", pnlPct, diagnostics: { ...detail, score: 5 } };
+    if (current.close >= trend.line || trend.direction === "UP") return { side: "CLOSE_SHORT", reason: "stop loss: broke SuperTrend line or flipped bullish", pnlPct, diagnostics: { ...detail, score: 5 } };
+    return { side: "HOLD", reason: `holding wick-ST SHORT ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics: { ...detail, score: 0 } };
+  }
+
+  if (wick.hasUpper && trend.direction === "DOWN" && current.close < trend.line) {
+    return { side: "SHORT", reason: `upper wick ${(wick.upperPct * 100).toFixed(0)}% + SuperTrend bearish`, score: 5, diagnostics: { ...detail, score: 5 } };
+  }
+  if (wick.hasLower && trend.direction === "UP" && current.close > trend.line) {
+    return { side: "LONG", reason: `lower wick ${(wick.lowerPct * 100).toFixed(0)}% + SuperTrend bullish`, score: 5, diagnostics: { ...detail, score: 5 } };
+  }
+
+  return { side: "WAIT", reason: `wick-ST conditions not met: ST ${trend.direction}, upper ${(wick.upperPct * 100).toFixed(0)}%, lower ${(wick.lowerPct * 100).toFixed(0)}%`, score: 0, diagnostics: { ...detail, score: 0 } };
+}
+
+function buildTrendHoldDecision(
+  candles: Candle[],
+  positionSide: "LONG" | "SHORT" | null,
+  entryPrice: number,
+  diagnostics: Record<string, unknown>,
+) {
+  const closedCandles = candles.slice(0, -1);
+  const current = closedCandles.at(-1) ?? candles.at(-1)!;
+  const previous = closedCandles.at(-2);
+  const closes = closedCandles.map((item) => item.close);
+  const ema20Series = ema(closes, 20);
+  const ema20 = ema20Series.at(-1);
+  const previousEma20 = ema20Series.at(-2);
+  const trend = supertrend(closedCandles, 10, 3).at(-1);
+  const flow = vaObv(closedCandles, 20, 20).at(-1);
+  const detail = { ...diagnostics, trend, ema20, vaObv: flow };
+
+  if (!trend || !ema20 || !flow) {
+    return { side: "WAIT", reason: "trend-hold indicators warming up", score: 0, diagnostics: { ...detail, score: 0 } };
+  }
+
+  const aboveEma = current.close > ema20;
+  const previousAboveEma = previous && previousEma20 ? previous.close > previousEma20 : false;
+  const belowEmaTwoCloses = Boolean(previous && previousEma20 && current.close < ema20 && previous.close < previousEma20);
+  const volumeStrong = flow.value > flow.signal || flow.value > flow.previousHigh;
+  const crossedUp = Boolean(previous && previousEma20 && previous.close <= previousEma20 && current.close > ema20);
+
+  if (positionSide === "LONG" && entryPrice > 0) {
+    const pnlPct = ((current.close - entryPrice) / entryPrice) * 100;
+    if (trend.direction === "DOWN") return { side: "CLOSE_LONG", reason: `trend-hold exit: SuperTrend flipped bearish ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics: { ...detail, score: 5 } };
+    if (belowEmaTwoCloses) return { side: "CLOSE_LONG", reason: `trend-hold exit: 2 closes below EMA20 ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics: { ...detail, score: 5 } };
+    return { side: "HOLD", reason: `holding trend-hold LONG ${pnlPct.toFixed(2)}%`, pnlPct, diagnostics: { ...detail, score: 0 } };
+  }
+
+  if (!positionSide && trend.direction === "UP" && aboveEma && volumeStrong) {
+    return { side: "LONG", reason: crossedUp || !previousAboveEma ? "trend-hold entry: SuperTrend bullish + EMA20 reclaim + VA-OBV strong" : "trend-hold entry: SuperTrend bullish + above EMA20 + VA-OBV strong", score: 5, diagnostics: { ...detail, score: 5 } };
+  }
+
+  return { side: "WAIT", reason: `trend-hold conditions not met: ST ${trend.direction}, EMA ${aboveEma ? "above" : "below"}, VA ${volumeStrong ? "strong" : "weak"}`, score: 0, diagnostics: { ...detail, score: 0 } };
+}
+
+function buildDecision(candles: Candle[], settings: Required<BotSettings>, positionAmount: number, entryPrice: number, partialTaken = false) {
   const current = candles.at(-2) ?? candles.at(-1)!;
   const previous = candles.at(-3);
   const hasPosition = Math.abs(positionAmount) > 0;
@@ -128,6 +358,21 @@ function buildDecision(candles: Candle[], settings: Required<BotSettings>, posit
       confirmLong: isConfirmLong,
     },
   };
+
+  if (strategy === 6 || strategy === 7) {
+    return buildTrendVolumeDecision(candles, settings, positionSide, entryPrice, partialTaken, diagnostics, strategy === 7);
+  }
+  if (strategy === 9) {
+    return hasPosition
+      ? { side: "HOLD", reason: `holding benchmark ${positionSide}`, score: 0, diagnostics: { ...diagnostics, score: 0 } }
+      : { side: "LONG", reason: "holding benchmark long entry", score: 5, diagnostics: { ...diagnostics, score: 5 } };
+  }
+  if (strategy === 8) {
+    return buildWickSupertrendDecision(candles, positionSide, entryPrice, diagnostics);
+  }
+  if (strategy === 10) {
+    return buildTrendHoldDecision(candles, positionSide, entryPrice, diagnostics);
+  }
 
   if (hasPosition && entryPrice > 0) {
     const pnlPct = positionSide === "LONG" ? ((current.close - entryPrice) / entryPrice) * 100 : ((entryPrice - current.close) / entryPrice) * 100;
@@ -177,16 +422,26 @@ async function binanceSigned(method: "GET" | "POST", path: string, params: Recor
   return data;
 }
 
-function quantityFrom(price: number, leverage: number) {
-  if (!Number.isFinite(price) || price <= 0) return "0.001";
+function quantityStep(symbol: string) {
+  return symbol === "BTCUSDT" ? 0.001 : 1;
+}
+
+function formatQuantity(raw: number, symbol: string) {
+  const step = quantityStep(symbol);
+  const quantity = Math.max(step, Math.floor(raw / step) * step);
+  return step >= 1 ? String(Math.floor(quantity)) : quantity.toFixed(3);
+}
+
+function quantityFrom(price: number, leverage: number, symbol: string) {
+  if (!Number.isFinite(price) || price <= 0) return formatQuantity(quantityStep(symbol), symbol);
   const raw = (BOT_MARGIN_USDT * leverage) / price;
-  return Math.max(0.001, Math.floor(raw * 1000) / 1000).toFixed(3);
+  return formatQuantity(raw, symbol);
 }
 
 function normalizeSettings(row: Record<string, unknown> | null, fallback: Record<string, unknown> = {}): Required<BotSettings> {
   return {
     enabled: Boolean(row?.enabled ?? fallback.enabled ?? true),
-    symbol: String(row?.symbol ?? fallback.symbol ?? "BTCUSDT"),
+    symbol: String(row?.symbol ?? fallback.symbol ?? DEFAULT_SYMBOL),
     interval: String(row?.interval ?? fallback.interval ?? "15m"),
     buyStrategy: Number(row?.buy_strategy ?? fallback.buyStrategy ?? 1),
     leverage: Number(row?.leverage ?? fallback.leverage ?? 1),
@@ -230,6 +485,17 @@ async function getRecentEvents(supabase: ReturnType<typeof createClient>) {
     .limit(12);
   if (error) throw error;
   return data ?? [];
+}
+
+function hasOpenPartialTaken(events: Array<Record<string, unknown>>) {
+  for (const event of events) {
+    const payload = event.payload as Record<string, unknown> | undefined;
+    const decision = payload?.decision as Record<string, unknown> | undefined;
+    const side = String(decision?.side ?? "");
+    if (side.startsWith("TRIM")) return true;
+    if (side === "LONG" || side === "SHORT" || side.startsWith("CLOSE")) return false;
+  }
+  return false;
 }
 
 function buildMetrics(events: Array<Record<string, unknown>>, position: Record<string, unknown> | null) {
@@ -348,19 +614,22 @@ Deno.serve(async (req) => {
     const position = Array.isArray(positions) ? positions[0] : positions;
     const positionAmount = Number(position?.positionAmt ?? 0);
     const entryPrice = Number(position?.entryPrice ?? 0);
-    const decision = buildDecision(candles, settings, positionAmount, entryPrice);
+    const recentEvents = await getRecentEvents(supabase);
+    const partialTaken = hasOpenPartialTaken(recentEvents);
+    const decision = buildDecision(candles, settings, positionAmount, entryPrice, partialTaken);
 
     let order = null;
     if (action === "run-once" && (decision.side === "LONG" || decision.side === "SHORT")) {
-      const quantity = quantityFrom(latest.close, settings.leverage);
+      const quantity = quantityFrom(latest.close, settings.leverage, settings.symbol);
       await binanceSigned("POST", "/fapi/v1/leverage", { symbol: settings.symbol, leverage: settings.leverage });
       const orderSide = decision.side === "LONG" ? "BUY" : "SELL";
       order = DRY_RUN ? { dryRun: true, side: orderSide, strategySide: decision.side, type: "MARKET", quantity } : await binanceSigned("POST", "/fapi/v1/order", { symbol: settings.symbol, side: orderSide, type: "MARKET", quantity });
     }
 
-    if (action === "run-once" && decision.side.startsWith("CLOSE") && Math.abs(positionAmount) > 0) {
-      const quantity = Math.abs(positionAmount).toFixed(3);
-      const orderSide = decision.side === "CLOSE_LONG" ? "SELL" : "BUY";
+    if (action === "run-once" && (decision.side.startsWith("CLOSE") || decision.side.startsWith("TRIM")) && Math.abs(positionAmount) > 0) {
+      const closeRatio = decision.side.startsWith("TRIM") ? 0.5 : 1;
+      const quantity = formatQuantity(Math.abs(positionAmount) * closeRatio, settings.symbol);
+      const orderSide = decision.side.endsWith("LONG") ? "SELL" : "BUY";
       order = DRY_RUN ? { dryRun: true, side: orderSide, strategySide: decision.side, type: "MARKET", quantity } : await binanceSigned("POST", "/fapi/v1/order", { symbol: settings.symbol, side: orderSide, type: "MARKET", quantity, reduceOnly: "true" });
     }
 

@@ -1,7 +1,7 @@
 create table if not exists public.bot_runs (
   id uuid primary key default gen_random_uuid(),
   status text not null default 'idle',
-  symbol text not null default 'BTCUSDT',
+  symbol text not null default 'ONDOUSDT',
   interval text not null default '15m',
   buy_strategy integer not null,
   leverage integer not null,
@@ -29,7 +29,7 @@ alter table public.bot_events enable row level security;
 create table if not exists public.bot_settings (
   id text primary key default 'default',
   enabled boolean not null default true,
-  symbol text not null default 'BTCUSDT',
+  symbol text not null default 'ONDOUSDT',
   interval text not null default '15m',
   buy_strategy integer not null default 1,
   leverage integer not null default 1,
@@ -51,7 +51,7 @@ insert into public.bot_settings (
 values (
   'default',
   true,
-  'BTCUSDT',
+  'ONDOUSDT',
   '15m',
   1,
   1,

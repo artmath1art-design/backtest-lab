@@ -5,6 +5,13 @@ import "./styles.css";
 
 const BINANCE_BASE = "https://api.binance.com/api/v3/klines";
 const BINANCE_LIMIT = 1000;
+const TRADE_SYMBOL = "ONDOUSDT";
+const SYMBOL_OPTIONS = [
+  { value: "BTCUSDT", label: "BTC USDT" },
+  { value: "ONDOUSDT", label: "ONDO USDT" },
+  { value: "ZECUSDT", label: "ZEC USDT" },
+  { value: "SUIUSDT", label: "SUI USDT" },
+];
 const TAKE_PROFIT_OPTIONS = [0.2, 1, 2, 3, 4, 5];
 const STOP_LOSS_OPTIONS = [
   { value: 0, label: "노손절" },
@@ -18,16 +25,20 @@ const STOP_LOSS_OPTIONS = [
 const LEVERAGE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20];
 const BUY_STRATEGIES = [
   { value: 1, label: "롱숏", description: "윗꼬리 숏 / 아랫꼬리 롱" },
-  { value: 2, label: "롱만", description: "아랫꼬리 롱만" },
-  { value: 3, label: "숏만", description: "윗꼬리 숏만" },
   { value: 4, label: "신중", description: "꼬리 후 다음봉 확인" },
-  { value: 5, label: "1분 테스트", description: "실행마다 매수/청산 반복" },
+  { value: 6, label: "VA추세", description: "SuperTrend + VA-OBV + EMA 볼밴" },
+  { value: 7, label: "VA롱", description: "VA추세 롱 전용" },
+  { value: 8, label: "꼬리ST", description: "꼬리 진입 + SuperTrend 손익" },
+  { value: 9, label: "홀딩", description: "기간 시작 즉시 매수 후 보유" },
+  { value: 10, label: "추세홀딩", description: "상승추세 롱 보유 전용" },
 ];
 const INTERVALS = [
   { value: "1m", label: "1분봉", ms: 60_000 },
   { value: "5m", label: "5분봉", ms: 5 * 60_000 },
   { value: "15m", label: "15분봉", ms: 15 * 60_000 },
   { value: "1h", label: "1시간봉", ms: 60 * 60_000 },
+  { value: "4h", label: "4시간봉", ms: 4 * 60 * 60_000 },
+  { value: "1d", label: "일봉", ms: 24 * 60 * 60_000 },
 ];
 
 function formatUsd(value, digits = 2) {
@@ -105,6 +116,21 @@ function bollinger(values, period = 20, multiplier = 2) {
   });
 }
 
+function emaBollinger(values, period = 20, multiplier = 2) {
+  const emaMiddle = ema(values, period);
+  return values.map((_, index) => {
+    if (index + 1 < period) return null;
+    const slice = values.slice(index + 1 - period, index + 1);
+    const middle = emaMiddle[index];
+    const deviation = standardDeviation(slice);
+    return {
+      middle,
+      upper: middle + deviation * multiplier,
+      lower: middle - deviation * multiplier,
+    };
+  });
+}
+
 function atr(candles, period = 14) {
   return candles.map((candle, index) => {
     if (index === 0 || index + 1 < period) return null;
@@ -115,6 +141,67 @@ function atr(candles, period = 14) {
       return Math.max(item.high - item.low, Math.abs(item.high - previous.close), Math.abs(item.low - previous.close));
     });
     return trueRanges.reduce((sum, value) => sum + value, 0) / period;
+  });
+}
+
+function supertrend(candles, period = 10, multiplier = 3) {
+  const atrValues = atr(candles, period);
+  const output = [];
+  let finalUpper = null;
+  let finalLower = null;
+  let direction = "UP";
+
+  candles.forEach((candle, index) => {
+    const atrValue = atrValues[index];
+    if (!atrValue) {
+      output.push(null);
+      return;
+    }
+
+    const hl2 = (candle.high + candle.low) / 2;
+    const basicUpper = hl2 + multiplier * atrValue;
+    const basicLower = hl2 - multiplier * atrValue;
+    const previousClose = candles[index - 1]?.close ?? candle.close;
+    const previousUpper = finalUpper ?? basicUpper;
+    const previousLower = finalLower ?? basicLower;
+
+    finalUpper = basicUpper < previousUpper || previousClose > previousUpper ? basicUpper : previousUpper;
+    finalLower = basicLower > previousLower || previousClose < previousLower ? basicLower : previousLower;
+
+    if (direction === "DOWN" && candle.close > finalUpper) direction = "UP";
+    else if (direction === "UP" && candle.close < finalLower) direction = "DOWN";
+
+    output.push({
+      direction,
+      line: direction === "UP" ? finalLower : finalUpper,
+      upper: finalUpper,
+      lower: finalLower,
+    });
+  });
+
+  return output;
+}
+
+function vaObv(candles, signalPeriod = 20, lookback = 20) {
+  let value = 0;
+  const series = candles.map((candle, index) => {
+    if (index === 0) return 0;
+    const previous = candles[index - 1];
+    const change = candle.close - previous.close;
+    const trueRange = Math.max(candle.high - candle.low, Math.abs(candle.high - previous.close), Math.abs(candle.low - previous.close), 0.00000001);
+    const volatilityWeight = Math.min(2, Math.abs(change) / trueRange);
+    value += Math.sign(change) * candle.volume * volatilityWeight;
+    return value;
+  });
+  const signal = ema(series, signalPeriod);
+  return series.map((item, index) => {
+    const previousWindow = series.slice(Math.max(0, index - lookback), index);
+    return {
+      value: item,
+      signal: signal[index],
+      previousHigh: previousWindow.length ? Math.max(...previousWindow) : item,
+      previousLow: previousWindow.length ? Math.min(...previousWindow) : item,
+    };
   });
 }
 
@@ -152,7 +239,7 @@ function parseKline(row) {
   };
 }
 
-async function fetchHistoricalCandles({ interval, days }) {
+async function fetchHistoricalCandles({ symbol, interval, days }) {
   const timeframe = INTERVALS.find((item) => item.value === interval) ?? INTERVALS[2];
   const endTime = Date.now();
   let startTime = endTime - Number(days) * 24 * 60 * 60 * 1000;
@@ -160,7 +247,7 @@ async function fetchHistoricalCandles({ interval, days }) {
 
   while (startTime < endTime) {
     const url = new URL(BINANCE_BASE);
-    url.searchParams.set("symbol", "BTCUSDT");
+    url.searchParams.set("symbol", symbol);
     url.searchParams.set("interval", interval);
     url.searchParams.set("limit", String(BINANCE_LIMIT));
     url.searchParams.set("startTime", String(startTime));
@@ -194,13 +281,146 @@ function analyzeWick(candle) {
   return { range, body, upper, lower, rangePct, upperPct, lowerPct, hasUpper, hasLower };
 }
 
-function buildGagokDecision({ candles, index, entryPrice, positionSide, buyStrategy, takeProfitPct, stopLossPct }) {
+function buildTrendVolumeDecision({ candles, index, entryPrice, positionSide, partialTaken, longOnly = false }) {
+  const current = candles[index];
+  const previous = candles[index - 1];
+  const closes = candles.slice(0, index + 1).map((item) => item.close);
+  const bb = emaBollinger(closes, 20, 2);
+  const bands = bb[index];
+  const previousBands = bb[index - 1];
+  const superTrend = supertrend(candles.slice(0, index + 1), 10, 3);
+  const trend = superTrend[index];
+  const volumeFlow = vaObv(candles.slice(0, index + 1), 20, 20);
+  const flow = volumeFlow[index];
+  const price = current.close;
+
+  if (!bands || !trend || !flow) {
+    return { side: "WAIT", score: 0, reason: "VA추세 지표 준비 중" };
+  }
+
+  const longEnergy = flow.value > flow.signal || flow.value > flow.previousHigh;
+  const shortEnergy = flow.value < flow.signal || flow.value < flow.previousLow;
+  const longPrice = price > bands.middle;
+  const shortPrice = price < bands.middle;
+  const crossedUp = Boolean(previous && previousBands && previous.close <= previousBands.middle && price > bands.middle);
+  const crossedDown = Boolean(previous && previousBands && previous.close >= previousBands.middle && price < bands.middle);
+
+  if (entryPrice && positionSide) {
+    if (positionSide === "LONG") {
+      if (!partialTaken && price >= bands.upper) return { side: "TRIM_LONG", score: 5, reason: "1차 익절: 볼밴 상단 터치 50% 정리" };
+      if (trend.direction === "DOWN") return { side: "CLOSE_LONG", score: 5, reason: "2차 청산: SuperTrend 매도 전환" };
+      if (price < trend.line || price < bands.lower) return { side: "CLOSE_LONG", score: 5, reason: "손절: SuperTrend/볼밴 하단 이탈" };
+      return { side: "HOLD", score: 0, reason: "VA추세 롱 보유" };
+    }
+
+    if (!partialTaken && price <= bands.lower) return { side: "TRIM_SHORT", score: 5, reason: "1차 익절: 볼밴 하단 터치 50% 정리" };
+    if (trend.direction === "UP") return { side: "CLOSE_SHORT", score: 5, reason: "2차 청산: SuperTrend 매수 전환" };
+    if (price > trend.line || price > bands.upper) return { side: "CLOSE_SHORT", score: 5, reason: "손절: SuperTrend/볼밴 상단 돌파" };
+    return { side: "HOLD", score: 0, reason: "VA추세 숏 보유" };
+  }
+
+  if (trend.direction === "UP" && longEnergy && longPrice) {
+    return { side: "LONG", score: 5, reason: crossedUp ? "SuperTrend 매수 + VA-OBV 강세 + EMA20 상향 안착" : "SuperTrend 매수 + VA-OBV 강세 + EMA20 위" };
+  }
+  if (!longOnly && trend.direction === "DOWN" && shortEnergy && shortPrice) {
+    return { side: "SHORT", score: 5, reason: crossedDown ? "SuperTrend 매도 + VA-OBV 약세 + EMA20 하향 안착" : "SuperTrend 매도 + VA-OBV 약세 + EMA20 아래" };
+  }
+
+  return { side: "WAIT", score: 0, reason: `${longOnly ? "VA롱" : "VA추세"} 대기: ST ${trend.direction}, VA ${flow.value > flow.signal ? "강세" : "약세"}, EMA20 ${price > bands.middle ? "위" : "아래"}` };
+}
+
+function buildWickSupertrendDecision({ candles, index, entryPrice, positionSide }) {
+  const candle = candles[index];
+  const price = candle.close;
+  const wick = analyzeWick(candle);
+  const trend = supertrend(candles.slice(0, index + 1), 10, 3)[index];
+
+  if (!trend) {
+    return { side: "WAIT", score: 0, reason: "SuperTrend 준비 중" };
+  }
+
+  if (entryPrice && positionSide) {
+    const stopDistance = Math.abs(entryPrice - trend.line);
+    const safeDistance = stopDistance > entryPrice * 0.0005 ? stopDistance : entryPrice * 0.002;
+    const longTarget = entryPrice + safeDistance * 1.5;
+    const shortTarget = entryPrice - safeDistance * 1.5;
+
+    if (positionSide === "LONG") {
+      if (price >= longTarget) return { side: "CLOSE_LONG", score: 5, reason: "익절: SuperTrend 손절폭 기준 1.5R 도달" };
+      if (price <= trend.line || trend.direction === "DOWN") return { side: "CLOSE_LONG", score: 5, reason: "손절: SuperTrend 라인 이탈 또는 매도 전환" };
+      return { side: "HOLD", score: 0, reason: "꼬리ST 롱 보유" };
+    }
+
+    if (price <= shortTarget) return { side: "CLOSE_SHORT", score: 5, reason: "익절: SuperTrend 손절폭 기준 1.5R 도달" };
+    if (price >= trend.line || trend.direction === "UP") return { side: "CLOSE_SHORT", score: 5, reason: "손절: SuperTrend 라인 돌파 또는 매수 전환" };
+    return { side: "HOLD", score: 0, reason: "꼬리ST 숏 보유" };
+  }
+
+  if (wick.hasUpper && trend.direction === "DOWN" && price < trend.line) {
+    return { side: "SHORT", score: 5, reason: `윗꼬리 ${(wick.upperPct * 100).toFixed(0)}% + SuperTrend 매도: 숏 진입` };
+  }
+  if (wick.hasLower && trend.direction === "UP" && price > trend.line) {
+    return { side: "LONG", score: 5, reason: `아랫꼬리 ${(wick.lowerPct * 100).toFixed(0)}% + SuperTrend 매수: 롱 진입` };
+  }
+
+  return { side: "WAIT", score: 0, reason: `꼬리ST 대기: ST ${trend.direction}, 윗꼬리 ${(wick.upperPct * 100).toFixed(0)}%, 아랫꼬리 ${(wick.lowerPct * 100).toFixed(0)}%` };
+}
+
+function buildTrendHoldDecision({ candles, index, entryPrice, positionSide }) {
+  const current = candles[index];
+  const previous = candles[index - 1];
+  const closes = candles.slice(0, index + 1).map((item) => item.close);
+  const middle = ema(closes, 20);
+  const ema20 = middle[index];
+  const previousEma20 = middle[index - 1];
+  const trend = supertrend(candles.slice(0, index + 1), 10, 3)[index];
+  const flow = vaObv(candles.slice(0, index + 1), 20, 20)[index];
+
+  if (!trend || !ema20 || !flow) {
+    return { side: "WAIT", score: 0, reason: "추세홀딩 지표 준비 중" };
+  }
+
+  const aboveEma = current.close > ema20;
+  const previousAboveEma = previous && previousEma20 ? previous.close > previousEma20 : false;
+  const belowEmaTwoCloses = Boolean(previous && previousEma20 && current.close < ema20 && previous.close < previousEma20);
+  const volumeStrong = flow.value > flow.signal || flow.value > flow.previousHigh;
+  const crossedUp = Boolean(previous && previousEma20 && previous.close <= previousEma20 && current.close > ema20);
+
+  if (entryPrice && positionSide === "LONG") {
+    const pnl = ((current.close - entryPrice) / entryPrice) * 100;
+    if (trend.direction === "DOWN") return { side: "CLOSE_LONG", score: 5, reason: `청산: SuperTrend 매도 전환 ${pnl.toFixed(2)}%` };
+    if (belowEmaTwoCloses) return { side: "CLOSE_LONG", score: 5, reason: `청산: EMA20 아래 2캔들 마감 ${pnl.toFixed(2)}%` };
+    return { side: "HOLD", score: 0, reason: `추세홀딩 롱 보유 ${pnl.toFixed(2)}%` };
+  }
+
+  if (trend.direction === "UP" && aboveEma && volumeStrong) {
+    return { side: "LONG", score: 5, reason: crossedUp || !previousAboveEma ? "SuperTrend 매수 + EMA20 회복 + VA-OBV 강세" : "SuperTrend 매수 + EMA20 위 + VA-OBV 강세" };
+  }
+
+  return { side: "WAIT", score: 0, reason: `추세홀딩 대기: ST ${trend.direction}, EMA20 ${aboveEma ? "위" : "아래"}, VA ${volumeStrong ? "강세" : "약세"}` };
+}
+
+function buildGagokDecision({ candles, index, entryPrice, positionSide, buyStrategy, takeProfitPct, stopLossPct, partialTaken }) {
   const candle = candles[index];
   const previous = candles[index - 1];
   const price = candle.close;
   const wick = analyzeWick(candle);
   const previousWick = previous ? analyzeWick(previous) : null;
   const strategy = Number(buyStrategy);
+  if (strategy === 9) {
+    return entryPrice && positionSide
+      ? { side: "HOLD", score: 0, reason: "홀딩 전략: 기간 끝까지 보유" }
+      : { side: "LONG", score: 5, reason: "홀딩 전략: 기간 시작 매수" };
+  }
+  if (strategy === 6 || strategy === 7) {
+    return buildTrendVolumeDecision({ candles, index, entryPrice, positionSide, partialTaken, longOnly: strategy === 7 });
+  }
+  if (strategy === 8) {
+    return buildWickSupertrendDecision({ candles, index, entryPrice, positionSide });
+  }
+  if (strategy === 10) {
+    return buildTrendHoldDecision({ candles, index, entryPrice, positionSide });
+  }
   const allowLong = strategy === 1 || strategy === 2 || strategy === 4;
   const allowShort = strategy === 1 || strategy === 3 || strategy === 4;
   const isConfirmLong = Boolean(previousWick?.hasLower && candle.close > candle.open);
@@ -239,18 +459,21 @@ function runBacktest(candles, settings) {
   const feeRate = Number(settings.feeRate) / 100;
   const slippage = Number(settings.slippage) / 100;
   const leverage = Number(settings.leverage) || 1;
+  const warmupCandles = Number(settings.buyStrategy) === 9 ? 0 : [6, 7, 8, 10].includes(Number(settings.buyStrategy)) ? 45 : 5;
+  const strategyInfo = BUY_STRATEGIES.find((strategy) => strategy.value === Number(settings.buyStrategy));
   let cash = Number(settings.initialCash);
   let positionAmount = 0;
   let positionSide = null;
   let marginUsed = 0;
   let entryPrice = null;
+  let partialTaken = false;
   let peakEquity = cash;
   let maxDrawdown = 0;
   const trades = [];
   const equityCurve = [];
 
   candles.forEach((candle, index) => {
-    if (index < 80) return;
+    if (index < warmupCandles) return;
     const price = candle.close;
     const decision = buildGagokDecision({
       candles,
@@ -260,6 +483,7 @@ function runBacktest(candles, settings) {
       buyStrategy: settings.buyStrategy,
       takeProfitPct: settings.takeProfitPct,
       stopLossPct: settings.stopLossPct,
+      partialTaken,
     });
 
     if ((decision.side === "LONG" || decision.side === "SHORT") && cash > 0 && !positionSide) {
@@ -273,6 +497,7 @@ function runBacktest(candles, settings) {
       positionAmount = amount;
       positionSide = decision.side;
       entryPrice = fillPrice;
+      partialTaken = false;
       trades.push({
         side: decision.side,
         time: candle.time,
@@ -283,28 +508,38 @@ function runBacktest(candles, settings) {
         pnlPct: null,
         reason: decision.reason,
       });
-    } else if (decision.side.startsWith("CLOSE") && positionAmount > 0) {
+    } else if ((decision.side.startsWith("CLOSE") || decision.side.startsWith("TRIM")) && positionAmount > 0) {
+      const closeRatio = decision.side.startsWith("TRIM") ? 0.5 : 1;
+      const closeAmount = positionAmount * closeRatio;
+      const releasedMargin = marginUsed * closeRatio;
       const fillPrice = positionSide === "LONG" ? price * (1 - slippage) : price * (1 + slippage);
-      const gross = positionAmount * fillPrice;
+      const gross = closeAmount * fillPrice;
       const fee = gross * feeRate;
-      const cost = positionAmount * entryPrice;
+      const cost = closeAmount * entryPrice;
       const pnl = (positionSide === "LONG" ? gross - cost : cost - gross) - fee;
-      const pnlPct = marginUsed ? (pnl / marginUsed) * 100 : 0;
-      cash += marginUsed + pnl;
+      const pnlPct = releasedMargin ? (pnl / releasedMargin) * 100 : 0;
+      cash += releasedMargin + pnl;
       trades.push({
         side: decision.side,
         time: candle.time,
         price: fillPrice,
-        amount: positionAmount,
+        amount: closeAmount,
         fee,
         pnl,
         pnlPct,
         reason: decision.reason,
       });
-      positionAmount = 0;
-      positionSide = null;
-      marginUsed = 0;
-      entryPrice = null;
+      if (decision.side.startsWith("TRIM")) {
+        positionAmount -= closeAmount;
+        marginUsed -= releasedMargin;
+        partialTaken = true;
+      } else {
+        positionAmount = 0;
+        positionSide = null;
+        marginUsed = 0;
+        entryPrice = null;
+        partialTaken = false;
+      }
     }
 
     const unrealized = positionSide === "LONG" ? positionAmount * (price - entryPrice) : positionSide === "SHORT" ? positionAmount * (entryPrice - price) : 0;
@@ -317,13 +552,18 @@ function runBacktest(candles, settings) {
   const lastPrice = candles.at(-1)?.close ?? 0;
   const finalUnrealized = positionSide === "LONG" ? positionAmount * (lastPrice - entryPrice) : positionSide === "SHORT" ? positionAmount * (entryPrice - lastPrice) : 0;
   const finalEquity = cash + (positionAmount > 0 && entryPrice ? marginUsed + finalUnrealized : 0);
-  const exits = trades.filter((trade) => trade.side.startsWith("CLOSE"));
+  const exits = trades.filter((trade) => trade.side.startsWith("CLOSE") || trade.side.startsWith("TRIM"));
   const wins = exits.filter((trade) => trade.pnl > 0).length;
   const losses = exits.filter((trade) => trade.pnl < 0).length;
   return {
     candles,
     trades,
     equityCurve,
+    strategyLabel: strategyInfo?.label ?? `전략 ${settings.buyStrategy}`,
+    strategyDescription: strategyInfo?.description ?? "",
+    symbol: settings.symbol,
+    interval: settings.interval,
+    days: settings.days,
     finalEquity,
     totalReturn: ((finalEquity - Number(settings.initialCash)) / Number(settings.initialCash)) * 100,
     maxDrawdown,
@@ -352,7 +592,7 @@ function BacktestChart({ result }) {
   const candleWidth = Math.max(2, Math.min(7, (width - 90) / visible.length) * 0.58);
 
   return (
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="BTCUSDT backtest chart">
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${result?.symbol ?? TRADE_SYMBOL} backtest chart`}>
       <rect width={width} height={height} rx="8" fill="#11161c" />
       {visible.map((candle) => {
         const x = xAt(candle.time);
@@ -422,7 +662,7 @@ function TestnetPanel({ settings }) {
   const latestRunEvent = testnetEvents.find((event) => event.event_type === "strategy_run");
   const tradeEvents = testnetEvents.filter((event) => {
     const side = event.payload?.decision?.side;
-    return event.event_type === "order_error" || ["LONG", "SHORT", "CLOSE_LONG", "CLOSE_SHORT"].includes(side);
+    return event.event_type === "order_error" || ["LONG", "SHORT", "TRIM_LONG", "TRIM_SHORT", "CLOSE_LONG", "CLOSE_SHORT"].includes(side);
   });
   const lastDecision = testnetDetail?.decision?.side ?? "READY";
   const statusTone = testnetStatus.startsWith("실패") ? "bad" : lastDecision === "BUY" || lastDecision === "SELL" ? "good" : "neutral";
@@ -447,7 +687,7 @@ function TestnetPanel({ settings }) {
         },
         body: JSON.stringify({
           action,
-          symbol: "BTCUSDT",
+          symbol: settings.symbol,
           interval: settings.interval,
           buyStrategy: settings.buyStrategy,
           leverage: settings.leverage,
@@ -501,7 +741,7 @@ function TestnetPanel({ settings }) {
         <div className="testnet-summary testnet-section-block">
           <div className="summary-title">운영 설정</div>
           <div className="settings-list">
-            <div><span>심볼</span><strong>BTCUSDT</strong></div>
+            <div><span>심볼</span><strong>{settings.symbol}</strong></div>
             <div><span>봉 기준</span><strong>{settings.interval}</strong></div>
             <div><span>매수</span><strong>{buyStrategy?.description ?? "-"}</strong></div>
             <div><span>레버리지</span><strong>{settings.leverage}x</strong></div>
@@ -602,12 +842,12 @@ function TestnetPanel({ settings }) {
           {tradeEvents.length ? tradeEvents.map((event) => {
             const decision = event.payload?.decision;
             const order = event.payload?.order;
-            const sideLabel = event.event_type === "order_error" ? "주문 실패" : decision?.side === "LONG" ? "롱 진입" : decision?.side === "SHORT" ? "숏 진입" : decision?.side === "CLOSE_LONG" ? "롱 청산" : "숏 청산";
+            const sideLabel = event.event_type === "order_error" ? "주문 실패" : decision?.side === "LONG" ? "롱 진입" : decision?.side === "SHORT" ? "숏 진입" : decision?.side === "TRIM_LONG" ? "롱 50% 정리" : decision?.side === "TRIM_SHORT" ? "숏 50% 정리" : decision?.side === "CLOSE_LONG" ? "롱 청산" : "숏 청산";
             const dotClass = event.event_type === "order_error" ? "error" : (decision?.side ?? "").toLowerCase();
             const quantity = Number(order?.origQty ?? order?.quantity ?? 0);
             const referencePrice = Number(order?.avgPrice && Number(order.avgPrice) > 0 ? order.avgPrice : event.payload?.latestClose ?? decision?.diagnostics?.price ?? 0);
             const notional = quantity && referencePrice ? quantity * referencePrice : null;
-            const priceLabel = decision?.side?.startsWith("CLOSE") ? "청산가" : "진입가";
+            const priceLabel = decision?.side?.startsWith("CLOSE") || decision?.side?.startsWith("TRIM") ? "청산가" : "진입가";
             return (
               <div className="testnet-event-row" key={event.id}>
                 <span className={`event-dot ${dotClass}`} title={sideLabel} aria-label={sideLabel}></span>
@@ -625,8 +865,9 @@ function TestnetPanel({ settings }) {
 
 function App() {
   const [settings, setSettings] = useState({
+    symbol: TRADE_SYMBOL,
     interval: "15m",
-    days: 90,
+    days: 14,
     initialCash: 50000,
     feeRate: 0.04,
     slippage: 0.02,
@@ -639,16 +880,23 @@ function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const recentTrades = useMemo(() => (result?.trades ?? []).slice(-18).reverse(), [result]);
+  const usesBuiltInRisk = [6, 7, 8, 9, 10].includes(settings.buyStrategy);
 
   function updateSetting(key, value) {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
+  useEffect(() => {
+    if (!BUY_STRATEGIES.some((strategy) => strategy.value === settings.buyStrategy)) {
+      updateSetting("buyStrategy", 1);
+    }
+  }, [settings.buyStrategy]);
+
   async function handleRun() {
     setLoading(true);
-    setStatus("Binance BTCUSDT 과거 캔들을 가져오는 중...");
+    setStatus(`Binance ${settings.symbol} 과거 캔들을 가져오는 중...`);
     try {
-      const candles = await fetchHistoricalCandles({ interval: settings.interval, days: settings.days });
+      const candles = await fetchHistoricalCandles({ symbol: settings.symbol, interval: settings.interval, days: settings.days });
       setStatus(`${candles.length.toLocaleString("ko-KR")}개 캔들로 가곡대광v1.0 전략 계산 중...`);
       const output = runBacktest(candles, settings);
       setResult(output);
@@ -666,7 +914,7 @@ function App() {
         <div>
           <div className="eyebrow">BTC Backtest Lab</div>
           <h1>가곡대광v1.0 백테스트</h1>
-          <p>Binance BTCUSDT 과거 캔들로 15분봉 평균회귀 전략을 빠르게 검증합니다.</p>
+          <p>Binance {settings.symbol} 과거 캔들로 꼬리 반전 전략을 빠르게 검증합니다.</p>
         </div>
         <button className="run-button" onClick={handleRun} disabled={loading}>
           <Play size={18} />
@@ -677,6 +925,21 @@ function App() {
       <section className="workspace">
         <aside className="panel controls">
           <h2>입력값</h2>
+          <div className="control-group">
+            <span>페어</span>
+            <div className="symbol-tabs">
+              {SYMBOL_OPTIONS.map((symbol) => (
+                <button
+                  key={symbol.value}
+                  className={settings.symbol === symbol.value ? "active" : ""}
+                  type="button"
+                  onClick={() => updateSetting("symbol", symbol.value)}
+                >
+                  {symbol.label}
+                </button>
+              ))}
+            </div>
+          </div>
           <label>
             봉 기준
             <select value={settings.interval} onChange={(event) => updateSetting("interval", event.target.value)}>
@@ -703,9 +966,6 @@ function App() {
               <option value={13}>최근 13일</option>
               <option value={14}>최근 14일</option>
               <option value={30}>최근 30일</option>
-              <option value={90}>최근 90일</option>
-              <option value={180}>최근 180일</option>
-              <option value={365}>최근 1년</option>
             </select>
           </label>
           <label>
@@ -751,14 +1011,16 @@ function App() {
               ))}
             </div>
           </div>
-          <div className="control-group">
+          <div className={`control-group ${usesBuiltInRisk ? "disabled-control" : ""}`}>
             <span>익절률</span>
+            {usesBuiltInRisk ? <small>{settings.buyStrategy === 10 ? "추세홀딩은 짧은 익절 없이 상승추세를 길게 보유합니다." : settings.buyStrategy === 9 ? "홀딩은 선택 기간 시작에 매수하고 끝까지 보유합니다." : settings.buyStrategy === 8 ? "꼬리ST는 SuperTrend 손절폭 기준 1.5R 익절을 사용합니다." : "VA 전략은 볼밴 50% 익절 + SuperTrend 청산을 사용합니다."}</small> : null}
             <div className="segmented-control">
               {TAKE_PROFIT_OPTIONS.map((value) => (
                 <button
                   key={value}
                   className={settings.takeProfitPct === value ? "active" : ""}
                   type="button"
+                  disabled={usesBuiltInRisk}
                   onClick={() => updateSetting("takeProfitPct", value)}
                 >
                   {value}%
@@ -766,14 +1028,16 @@ function App() {
               ))}
             </div>
           </div>
-          <div className="control-group">
+          <div className={`control-group ${usesBuiltInRisk ? "disabled-control" : ""}`}>
             <span>손절률</span>
+            {usesBuiltInRisk ? <small>{settings.buyStrategy === 10 ? "추세홀딩은 SuperTrend 매도 전환 또는 EMA20 아래 2캔들 마감으로 청산합니다." : settings.buyStrategy === 9 ? "홀딩은 손절 없이 기간 종료 평가금으로 수익률을 계산합니다." : settings.buyStrategy === 8 ? "꼬리ST는 SuperTrend 라인 이탈 또는 반대 전환으로 손절합니다." : "VA 전략은 SuperTrend 라인 또는 볼밴 반대선 이탈로 손절합니다."}</small> : null}
             <div className="segmented-control">
               {STOP_LOSS_OPTIONS.map((option) => (
                 <button
                   key={option.value}
                   className={settings.stopLossPct === option.value ? "active" : ""}
                   type="button"
+                  disabled={usesBuiltInRisk}
                   onClick={() => updateSetting("stopLossPct", option.value)}
                 >
                   {option.label}
@@ -783,7 +1047,31 @@ function App() {
           </div>
           <div className="strategy-note">
             <strong>전략</strong>
-            <span>15분봉 꼬리 반전: 윗꼬리 기준 충족 시 숏, 아랫꼬리 기준 충족 시 롱, 익절/손절 0.2%</span>
+            {settings.buyStrategy === 10 ? (
+              <span>
+                추세홀딩: 상승추세 전용 롱 전략입니다. SuperTrend가 매수 방향이고 가격이 EMA20 위에 있으며 VA-OBV가 Signal 위 또는 직전 고점을 돌파하면 롱 진입합니다.
+                볼밴 상단 익절 없이 계속 보유하고, SuperTrend가 매도 전환되거나 EMA20 아래로 2캔들 연속 마감하면 청산합니다.
+              </span>
+            ) : settings.buyStrategy === 9 ? (
+              <span>
+                홀딩: 선택한 최근 기간의 첫 캔들에서 바로 롱 매수하고, 중간 청산 없이 마지막 캔들까지 그대로 보유합니다.
+                매매전략 성과가 단순 보유보다 나은지 비교하는 기준 전략입니다.
+              </span>
+            ) : settings.buyStrategy === 8 ? (
+              <span>
+                꼬리ST: 윗꼬리가 나오고 SuperTrend가 매도 방향이며 가격이 SuperTrend 라인 아래에 있으면 숏,
+                아랫꼬리가 나오고 SuperTrend가 매수 방향이며 가격이 SuperTrend 라인 위에 있으면 롱 진입합니다.
+                손절은 SuperTrend 라인 이탈 또는 반대 전환, 익절은 진입가와 SuperTrend 손절선 사이 거리의 1.5배입니다.
+              </span>
+            ) : usesBuiltInRisk ? (
+              <span>
+                {settings.buyStrategy === 7 ? "VA롱" : "VA추세"}: SuperTrend가 방향을 잡고, VA-OBV가 Signal 돌파 또는 직전 고점/저점 돌파로 거래량 에너지를 확인합니다.
+                {settings.buyStrategy === 7 ? " 캔들이 EMA20 볼밴 중간선 위에 안착할 때 롱 진입만 봅니다." : " 캔들이 EMA20 볼밴 중간선 위면 롱, 아래면 숏 진입을 봅니다."} 1차 익절은 볼밴 상단/하단 터치 시 50% 정리,
+                남은 물량은 SuperTrend 반대 전환까지 보유합니다. 손절은 SuperTrend 라인 또는 볼밴 반대선 이탈 기준입니다.
+              </span>
+            ) : (
+              <span>꼬리 반전: 윗꼬리 기준 충족 시 숏, 아랫꼬리 기준 충족 시 롱. 선택한 익절/손절률 적용</span>
+            )}
           </div>
         </aside>
 
@@ -791,15 +1079,20 @@ function App() {
           <div className="panel chart-panel">
             <div className="panel-head">
               <div>
-                <h2>BTCUSDT 과거 차트</h2>
+                <h2>{result?.symbol ?? settings.symbol} 과거 차트</h2>
                 <p>{status}</p>
               </div>
-              <div className="source-pill">Binance API</div>
+              <div className="source-pill">{result ? `${result.symbol} · ${result.strategyLabel} · ${result.interval} · ${result.days}일` : "Binance API"}</div>
             </div>
             <BacktestChart result={result} />
           </div>
 
           <div className="stats-grid">
+            <div className="stat-card strategy-result-card">
+              <div className="stat-title">사용 전략</div>
+              <strong>{result?.strategyLabel ?? "--"}</strong>
+              <span>{result?.strategyDescription ?? "백테스트 실행 후 표시"}</span>
+            </div>
             <StatCard icon={Wallet} title="최종 평가금" value={`$${formatUsd(result?.finalEquity)}`} caption={`초기 $${formatUsd(settings.initialCash)}`} />
             <StatCard icon={Gauge} title="총 수익률" value={formatPct(result?.totalReturn)} caption="수수료·슬리피지 반영" tone={Number(result?.totalReturn ?? 0) >= 0 ? "good" : "bad"} />
             <StatCard icon={ShieldAlert} title="최대 낙폭" value={formatPct(result?.maxDrawdown)} caption="MDD" tone="bad" />

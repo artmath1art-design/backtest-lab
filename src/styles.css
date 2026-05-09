@@ -120,6 +120,21 @@ label {
   font-size: 13px;
 }
 
+.control-group small {
+  color: #7f91a5;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.disabled-control {
+  opacity: 0.62;
+}
+
+.disabled-control button {
+  cursor: not-allowed;
+}
+
 input,
 select {
   width: 100%;
@@ -132,7 +147,8 @@ select {
 }
 
 .segmented-control,
-.leverage-control {
+.leverage-control,
+.symbol-tabs {
   display: grid;
   gap: 6px;
   grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
@@ -142,8 +158,13 @@ select {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
+.symbol-tabs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .segmented-control button,
-.leverage-control button {
+.leverage-control button,
+.symbol-tabs button {
   border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 6px;
   background: #111820;
@@ -154,7 +175,8 @@ select {
 }
 
 .segmented-control button.active,
-.leverage-control button.active {
+.leverage-control button.active,
+.symbol-tabs button.active {
   border-color: rgba(56, 189, 248, 0.54);
   background: #38bdf8;
   color: #061016;
@@ -576,7 +598,9 @@ select {
 }
 
 .event-dot.close_long,
-.event-dot.close_short {
+.event-dot.close_short,
+.event-dot.trim_long,
+.event-dot.trim_short {
   background: #fbbf24;
   border-color: #fbbf24;
 }
