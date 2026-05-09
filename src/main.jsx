@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, BarChart3, CalendarClock, Gauge, Play, ShieldAlert, Wallet } from "lucide-react";
+import { Activity, BarChart3, CalendarClock, Gauge, Play, RotateCcw, ShieldAlert, Wallet, ZoomIn, ZoomOut } from "lucide-react";
 import "./styles.css";
 
 const BINANCE_BASE = "https://api.binance.com/api/v3/klines";
@@ -32,6 +32,15 @@ const BUY_STRATEGIES = [
   { value: 9, label: "홀딩", description: "기간 시작 즉시 매수 후 보유" },
   { value: 10, label: "추세홀딩", description: "상승추세 롱 보유 전용" },
 ];
+const SIM_BOTS = [
+  { id: "bot-wick", strategy: 1, name: "꼬리 롱숏", accent: "cyan" },
+  { id: "bot-confirm", strategy: 4, name: "신중 꼬리", accent: "emerald" },
+  { id: "bot-va", strategy: 6, name: "VA추세", accent: "amber" },
+  { id: "bot-va-long", strategy: 7, name: "VA롱", accent: "cyan" },
+  { id: "bot-wick-st", strategy: 8, name: "꼬리ST", accent: "rose" },
+  { id: "bot-trend-hold", strategy: 10, name: "추세홀딩", accent: "emerald" },
+];
+const SIM_BOT_CASH = 10000;
 const INTERVALS = [
   { value: "1m", label: "1분봉", ms: 60_000 },
   { value: "5m", label: "5분봉", ms: 5 * 60_000 },
@@ -239,11 +248,16 @@ function parseKline(row) {
   };
 }
 
-async function fetchHistoricalCandles({ symbol, interval, days }) {
+async function fetchHistoricalCandles({ symbol, interval, days, startDate, endDate }) {
   const timeframe = INTERVALS.find((item) => item.value === interval) ?? INTERVALS[2];
-  const endTime = Date.now();
-  let startTime = endTime - Number(days) * 24 * 60 * 60 * 1000;
+  const hasCustomRange = Boolean(startDate && endDate);
+  const endTime = hasCustomRange ? new Date(`${endDate}T23:59:59`).getTime() : Date.now();
+  let startTime = hasCustomRange ? new Date(`${startDate}T00:00:00`).getTime() : endTime - Number(days) * 24 * 60 * 60 * 1000;
   const candles = [];
+
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime) {
+    throw new Error("기간설정의 시작일과 종료일을 확인해주세요.");
+  }
 
   while (startTime < endTime) {
     const url = new URL(BINANCE_BASE);
@@ -263,7 +277,20 @@ async function fetchHistoricalCandles({ symbol, interval, days }) {
     if (candles.length > 22000) break;
   }
 
-  return candles.filter((candle, index, rows) => index === 0 || candle.time !== rows[index - 1].time);
+  const uniqueCandles = candles.filter((candle, index, rows) => index === 0 || candle.time !== rows[index - 1].time);
+  if (!uniqueCandles.length) throw new Error("선택한 기간에 가져올 수 있는 캔들이 없습니다.");
+  return uniqueCandles;
+}
+
+async function fetchRecentCandles({ symbol, interval, limit = 180 }) {
+  const url = new URL(BINANCE_BASE);
+  url.searchParams.set("symbol", symbol);
+  url.searchParams.set("interval", interval);
+  url.searchParams.set("limit", String(limit));
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Binance ${response.status}: ${response.statusText}`);
+  const rows = await response.json();
+  return rows.map(parseKline);
 }
 
 function analyzeWick(candle) {
@@ -306,6 +333,9 @@ function buildTrendVolumeDecision({ candles, index, entryPrice, positionSide, pa
   const crossedDown = Boolean(previous && previousBands && previous.close >= previousBands.middle && price < bands.middle);
 
   if (entryPrice && positionSide) {
+    if (longOnly && positionSide === "SHORT") {
+      return { side: "CLOSE_SHORT", score: 5, reason: "VA롱 전용: 기존 숏 포지션 정리" };
+    }
     if (positionSide === "LONG") {
       if (!partialTaken && price >= bands.upper) return { side: "TRIM_LONG", score: 5, reason: "1차 익절: 볼밴 상단 터치 50% 정리" };
       if (trend.direction === "DOWN") return { side: "CLOSE_LONG", score: 5, reason: "2차 청산: SuperTrend 매도 전환" };
@@ -564,6 +594,7 @@ function runBacktest(candles, settings) {
     symbol: settings.symbol,
     interval: settings.interval,
     days: settings.days,
+    rangeLabel: settings.startDate && settings.endDate ? `${settings.startDate} ~ ${settings.endDate}` : `최근 ${settings.days}일`,
     finalEquity,
     totalReturn: ((finalEquity - Number(settings.initialCash)) / Number(settings.initialCash)) * 100,
     maxDrawdown,
@@ -575,11 +606,116 @@ function runBacktest(candles, settings) {
   };
 }
 
+function createSimBot(bot) {
+  const strategy = BUY_STRATEGIES.find((item) => item.value === bot.strategy);
+  return {
+    ...bot,
+    strategyLabel: strategy?.label ?? bot.name,
+    strategyDescription: strategy?.description ?? "",
+    cash: SIM_BOT_CASH,
+    positionAmount: 0,
+    positionSide: null,
+    marginUsed: 0,
+    entryPrice: null,
+    partialTaken: false,
+    lastCandleTime: null,
+    lastDecision: "READY",
+    lastReason: "가상 봇 대기",
+    latestPrice: null,
+    equity: SIM_BOT_CASH,
+    trades: [],
+  };
+}
+
+function simulateBotTick(bot, candles, settings) {
+  const index = candles.length - 2;
+  const candle = candles[index];
+  if (!candle) return bot;
+  const warmupCandles = [6, 7, 8, 10].includes(Number(bot.strategy)) ? 45 : 5;
+  if (index < warmupCandles) {
+    return { ...bot, latestPrice: candle.close, lastReason: "지표 준비 중", equity: bot.cash + bot.marginUsed };
+  }
+  if (bot.lastCandleTime === candle.time) {
+    const unrealized = bot.positionSide === "LONG" ? bot.positionAmount * (candle.close - bot.entryPrice) : bot.positionSide === "SHORT" ? bot.positionAmount * (bot.entryPrice - candle.close) : 0;
+    return { ...bot, latestPrice: candle.close, equity: bot.cash + (bot.positionAmount > 0 ? bot.marginUsed + unrealized : 0) };
+  }
+
+  const feeRate = Number(settings.feeRate) / 100;
+  const slippage = Number(settings.slippage) / 100;
+  const leverage = Number(settings.leverage) || 1;
+  const decision = buildGagokDecision({
+    candles,
+    index,
+    entryPrice: bot.entryPrice,
+    positionSide: bot.positionSide,
+    buyStrategy: bot.strategy,
+    takeProfitPct: settings.takeProfitPct,
+    stopLossPct: settings.stopLossPct,
+    partialTaken: bot.partialTaken,
+  });
+
+  let next = { ...bot, latestPrice: candle.close, lastCandleTime: candle.time, lastDecision: decision.side, lastReason: decision.reason };
+
+  if ((decision.side === "LONG" || decision.side === "SHORT") && next.cash > 0 && !next.positionSide) {
+    const margin = Math.min(next.cash, SIM_BOT_CASH);
+    const notional = margin * leverage;
+    const fillPrice = decision.side === "LONG" ? candle.close * (1 + slippage) : candle.close * (1 - slippage);
+    const fee = notional * feeRate;
+    const amount = notional / fillPrice;
+    next = {
+      ...next,
+      cash: next.cash - margin - fee,
+      marginUsed: margin,
+      positionAmount: amount,
+      positionSide: decision.side,
+      entryPrice: fillPrice,
+      partialTaken: false,
+      trades: [{ side: decision.side, time: candle.time, price: fillPrice, pnl: null, reason: decision.reason }, ...next.trades].slice(0, 8),
+    };
+  } else if ((decision.side.startsWith("CLOSE") || decision.side.startsWith("TRIM")) && next.positionAmount > 0) {
+    const closeRatio = decision.side.startsWith("TRIM") ? 0.5 : 1;
+    const closeAmount = next.positionAmount * closeRatio;
+    const releasedMargin = next.marginUsed * closeRatio;
+    const fillPrice = next.positionSide === "LONG" ? candle.close * (1 - slippage) : candle.close * (1 + slippage);
+    const gross = closeAmount * fillPrice;
+    const fee = gross * feeRate;
+    const cost = closeAmount * next.entryPrice;
+    const pnl = (next.positionSide === "LONG" ? gross - cost : cost - gross) - fee;
+
+    if (decision.side.startsWith("TRIM")) {
+      next = {
+        ...next,
+        cash: next.cash + releasedMargin + pnl,
+        marginUsed: next.marginUsed - releasedMargin,
+        positionAmount: next.positionAmount - closeAmount,
+        partialTaken: true,
+        trades: [{ side: decision.side, time: candle.time, price: fillPrice, pnl, reason: decision.reason }, ...next.trades].slice(0, 8),
+      };
+    } else {
+      next = {
+        ...next,
+        cash: next.cash + next.marginUsed + pnl,
+        marginUsed: 0,
+        positionAmount: 0,
+        positionSide: null,
+        entryPrice: null,
+        partialTaken: false,
+        trades: [{ side: decision.side, time: candle.time, price: fillPrice, pnl, reason: decision.reason }, ...next.trades].slice(0, 8),
+      };
+    }
+  }
+
+  const unrealized = next.positionSide === "LONG" ? next.positionAmount * (candle.close - next.entryPrice) : next.positionSide === "SHORT" ? next.positionAmount * (next.entryPrice - candle.close) : 0;
+  return { ...next, equity: next.cash + (next.positionAmount > 0 ? next.marginUsed + unrealized : 0) };
+}
+
 function BacktestChart({ result }) {
+  const [visibleCount, setVisibleCount] = useState(260);
   const width = 980;
   const height = 360;
   const candles = result?.candles ?? [];
-  const visible = candles.slice(-260);
+  const normalizedVisibleCount = Math.min(Math.max(visibleCount, 40), Math.max(candles.length, 40));
+  const visible = candles.slice(-normalizedVisibleCount);
   if (!visible.length) return <div className="empty-chart">백테스트를 실행하면 차트가 표시됩니다.</div>;
   const start = visible[0].time;
   const end = visible.at(-1).time;
@@ -592,47 +728,61 @@ function BacktestChart({ result }) {
   const candleWidth = Math.max(2, Math.min(7, (width - 90) / visible.length) * 0.58);
 
   return (
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${result?.symbol ?? TRADE_SYMBOL} backtest chart`}>
-      <rect width={width} height={height} rx="8" fill="#11161c" />
-      {visible.map((candle) => {
-        const x = xAt(candle.time);
-        const openY = yAt(candle.open);
-        const closeY = yAt(candle.close);
-        const color = candle.close >= candle.open ? "#3ddc97" : "#ff6b7a";
-        return (
-          <g key={candle.time}>
-            <line x1={x} x2={x} y1={yAt(candle.high)} y2={yAt(candle.low)} stroke={color} strokeWidth="1.1" />
-            <rect
-              x={x - candleWidth / 2}
-              y={Math.min(openY, closeY)}
-              width={candleWidth}
-              height={Math.max(2, Math.abs(openY - closeY))}
-              rx="1"
-              fill={color}
-            />
-          </g>
-        );
-      })}
-      {trades.map((trade) => (
-        <g key={`${trade.side}-${trade.time}-${trade.price}`}>
-          <circle cx={xAt(trade.time)} cy={yAt(trade.price)} r="5" fill={trade.side === "LONG" ? "#38bdf8" : trade.side === "SHORT" ? "#ff6b7a" : "#fbbf24"} />
-          <text x={xAt(trade.time) + 7} y={yAt(trade.price) - 7} fill="#dbeafe" fontSize="11">
-            {trade.side}
-          </text>
-        </g>
-      ))}
-      {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-        const price = high - range * ratio;
-        return (
-          <g key={ratio}>
-            <line x1="20" x2={width - 45} y1={yAt(price)} y2={yAt(price)} stroke="rgba(148,163,184,.12)" />
-            <text x={width - 38} y={yAt(price) + 4} fill="#94a3b8" fontSize="11">
-              {formatUsd(price, 0)}
+    <div className="chart-shell">
+      <div className="chart-tools" aria-label="차트 확대 축소">
+        <button type="button" title="확대" onClick={() => setVisibleCount((current) => Math.max(40, Math.floor(current * 0.65)))}>
+          <ZoomIn size={15} />
+        </button>
+        <button type="button" title="축소" onClick={() => setVisibleCount((current) => Math.min(candles.length || 260, Math.ceil(current * 1.45)))}>
+          <ZoomOut size={15} />
+        </button>
+        <button type="button" title="초기화" onClick={() => setVisibleCount(260)}>
+          <RotateCcw size={15} />
+        </button>
+        <span>{visible.length}개 캔들</span>
+      </div>
+      <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${result?.symbol ?? TRADE_SYMBOL} backtest chart`}>
+        <rect width={width} height={height} rx="8" fill="#11161c" />
+        {visible.map((candle) => {
+          const x = xAt(candle.time);
+          const openY = yAt(candle.open);
+          const closeY = yAt(candle.close);
+          const color = candle.close >= candle.open ? "#3ddc97" : "#ff6b7a";
+          return (
+            <g key={candle.time}>
+              <line x1={x} x2={x} y1={yAt(candle.high)} y2={yAt(candle.low)} stroke={color} strokeWidth="1.1" />
+              <rect
+                x={x - candleWidth / 2}
+                y={Math.min(openY, closeY)}
+                width={candleWidth}
+                height={Math.max(2, Math.abs(openY - closeY))}
+                rx="1"
+                fill={color}
+              />
+            </g>
+          );
+        })}
+        {trades.map((trade) => (
+          <g key={`${trade.side}-${trade.time}-${trade.price}`}>
+            <circle cx={xAt(trade.time)} cy={yAt(trade.price)} r="5" fill={trade.side === "LONG" ? "#38bdf8" : trade.side === "SHORT" ? "#ff6b7a" : "#fbbf24"} />
+            <text x={xAt(trade.time) + 7} y={yAt(trade.price) - 7} fill="#dbeafe" fontSize="11">
+              {trade.side}
             </text>
           </g>
-        );
-      })}
-    </svg>
+        ))}
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+          const price = high - range * ratio;
+          return (
+            <g key={ratio}>
+              <line x1="20" x2={width - 45} y1={yAt(price)} y2={yAt(price)} stroke="rgba(148,163,184,.12)" />
+              <text x={width - 38} y={yAt(price) + 4} fill="#94a3b8" fontSize="11">
+                {formatUsd(price, 0)}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
   );
 }
 
@@ -660,6 +810,7 @@ function TestnetPanel({ settings }) {
   const diagnostics = testnetDetail?.decision?.diagnostics;
   const testnetMetrics = testnetDetail?.metrics;
   const latestRunEvent = testnetEvents.find((event) => event.event_type === "strategy_run");
+  const runEvents = testnetEvents.filter((event) => event.event_type === "strategy_run").slice(0, 6);
   const tradeEvents = testnetEvents.filter((event) => {
     const side = event.payload?.decision?.side;
     return event.event_type === "order_error" || ["LONG", "SHORT", "TRIM_LONG", "TRIM_SHORT", "CLOSE_LONG", "CLOSE_SHORT"].includes(side);
@@ -830,15 +981,27 @@ function TestnetPanel({ settings }) {
         </div>
       </div>
 
-      <div className="testnet-events-panel">
-        <div className="diagnostic-head">
-          <div>
-            <div className="summary-title">테스트넷 실행 내역</div>
-            <p>최근 매매 신호를 5초마다 자동 갱신합니다.</p>
+        <div className="testnet-events-panel">
+          <div className="diagnostic-head">
+            <div>
+              <div className="summary-title">테스트넷 실행 내역</div>
+              <p>최근 판단은 실시간으로 보이고, 실제 주문 체결은 아래에 따로 표시합니다.</p>
+            </div>
+            <button className="refresh-status-button compact" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("events")}>새로고침</button>
           </div>
-          <button className="refresh-status-button compact" type="button" disabled={!canInvoke || testnetLoading} onClick={() => invokeTestnet("events")}>새로고침</button>
-        </div>
-        <div className="testnet-event-list">
+          <div className="testnet-run-list">
+            {runEvents.length ? runEvents.map((event) => {
+              const decision = event.payload?.decision;
+              return (
+                <div className="testnet-run-row" key={event.id}>
+                  <span>{decision?.side ?? "RUN"}</span>
+                  <strong>{decision?.reason ?? event.message}</strong>
+                  <em>{new Date(event.created_at).toLocaleTimeString()}</em>
+                </div>
+              );
+            }) : <div className="empty-list">아직 전략 판단 기록이 없습니다.</div>}
+          </div>
+          <div className="testnet-event-list">
           {tradeEvents.length ? tradeEvents.map((event) => {
             const decision = event.payload?.decision;
             const order = event.payload?.order;
@@ -863,11 +1026,108 @@ function TestnetPanel({ settings }) {
   );
 }
 
+function AiBotSimulationPanel({ settings }) {
+  const [bots, setBots] = useState(() => SIM_BOTS.map(createSimBot));
+  const [running, setRunning] = useState(true);
+  const [status, setStatus] = useState("가상 봇 초기화 중");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  async function refreshBots(quiet = false) {
+    if (!quiet) setStatus("최신 캔들 확인 중...");
+    try {
+      const candles = await fetchRecentCandles({ symbol: settings.symbol, interval: settings.interval, limit: 180 });
+      setBots((current) => current.map((bot) => simulateBotTick(bot, candles, settings)));
+      setLastUpdated(new Date());
+      if (!quiet) setStatus(`${settings.symbol} ${settings.interval} 기준 가상 체결 갱신 완료`);
+    } catch (error) {
+      setStatus(`실패: ${error.message}`);
+    }
+  }
+
+  useEffect(() => {
+    setBots(SIM_BOTS.map(createSimBot));
+    setStatus(`${settings.symbol} ${settings.interval} 기준으로 봇 6개 리셋`);
+  }, [settings.symbol, settings.interval]);
+
+  useEffect(() => {
+    if (!running) return undefined;
+    refreshBots(true);
+    const timer = window.setInterval(() => refreshBots(true), 15000);
+    return () => window.clearInterval(timer);
+  }, [running, settings.symbol, settings.interval, settings.leverage, settings.takeProfitPct, settings.stopLossPct]);
+
+  const bestBot = bots.reduce((best, bot) => (bot.equity > best.equity ? bot : best), bots[0]);
+
+  return (
+    <section className="panel ai-bot-panel">
+      <div className="ai-bot-head">
+        <div>
+          <div className="eyebrow">AI Paper Bot Lab</div>
+          <h2>AI봇 모의투자</h2>
+          <p>각 전략 봇이 독립 가상 계좌로 실시간 캔들을 확인하고 가상 체결합니다.</p>
+        </div>
+        <div className="ai-bot-actions">
+          <div className={`connection ${running ? "live" : "offline"}`}><span></span>{running ? "AUTO" : "PAUSED"}</div>
+          <button className="refresh-status-button compact" type="button" onClick={() => setRunning((value) => !value)}>{running ? "정지" : "시작"}</button>
+          <button className="refresh-status-button compact" type="button" onClick={() => refreshBots()}>갱신</button>
+          <button className="refresh-status-button compact" type="button" onClick={() => setBots(SIM_BOTS.map(createSimBot))}>리셋</button>
+        </div>
+      </div>
+
+      <div className="bot-status-strip">
+        <span className="bot-pulse"></span>
+        <div>
+          <strong>{bestBot?.name ?? "--"} 선두</strong>
+          <small>{status} · {lastUpdated ? lastUpdated.toLocaleTimeString() : "대기 중"}</small>
+        </div>
+        <div className="bot-status-meta">
+          <span>{settings.symbol}</span>
+          <strong>{settings.interval}</strong>
+        </div>
+      </div>
+
+      <div className="ai-bot-grid">
+        {bots.map((bot) => {
+          const returnPct = ((bot.equity - SIM_BOT_CASH) / SIM_BOT_CASH) * 100;
+          const latestTrade = bot.trades[0];
+          return (
+            <article className={`ai-bot-card ${bot.accent}`} key={bot.id}>
+              <div className="ai-bot-card-top">
+                <div>
+                  <span>{bot.strategyLabel}</span>
+                  <strong>{bot.name}</strong>
+                </div>
+                <em className={bot.positionSide ? bot.positionSide.toLowerCase() : "wait"}>{bot.positionSide ?? "WAIT"}</em>
+              </div>
+              <div className="bot-metrics">
+                <div><span>평가금</span><strong>${formatUsd(bot.equity)}</strong></div>
+                <div><span>수익률</span><strong className={returnPct >= 0 ? "good" : "bad"}>{formatPct(returnPct)}</strong></div>
+                <div><span>진입가</span><strong>{bot.entryPrice ? `$${formatUsd(bot.entryPrice)}` : "--"}</strong></div>
+                <div><span>최근가</span><strong>{bot.latestPrice ? `$${formatUsd(bot.latestPrice)}` : "--"}</strong></div>
+              </div>
+              <div className="bot-decision">
+                <span>{bot.lastDecision}</span>
+                <p>{bot.lastReason}</p>
+              </div>
+              <div className="bot-last-trade">
+                <span>최근 체결</span>
+                <strong>{latestTrade ? `${latestTrade.side} · $${formatUsd(latestTrade.price)}` : "체결 없음"}</strong>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [settings, setSettings] = useState({
     symbol: TRADE_SYMBOL,
     interval: "15m",
     days: 14,
+    startDate: "",
+    endDate: "",
     initialCash: 50000,
     feeRate: 0.04,
     slippage: 0.02,
@@ -881,6 +1141,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const recentTrades = useMemo(() => (result?.trades ?? []).slice(-18).reverse(), [result]);
   const usesBuiltInRisk = [6, 7, 8, 9, 10].includes(settings.buyStrategy);
+  const today = new Date().toISOString().slice(0, 10);
 
   function updateSetting(key, value) {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -896,7 +1157,13 @@ function App() {
     setLoading(true);
     setStatus(`Binance ${settings.symbol} 과거 캔들을 가져오는 중...`);
     try {
-      const candles = await fetchHistoricalCandles({ symbol: settings.symbol, interval: settings.interval, days: settings.days });
+      const candles = await fetchHistoricalCandles({
+        symbol: settings.symbol,
+        interval: settings.interval,
+        days: settings.days,
+        startDate: settings.startDate,
+        endDate: settings.endDate,
+      });
       setStatus(`${candles.length.toLocaleString("ko-KR")}개 캔들로 가곡대광v1.0 전략 계산 중...`);
       const output = runBacktest(candles, settings);
       setResult(output);
@@ -968,6 +1235,31 @@ function App() {
               <option value={30}>최근 30일</option>
             </select>
           </label>
+          <div className="control-group">
+            <span>기간설정</span>
+            <div className="date-range-grid">
+              <label>
+                시작일
+                <input
+                  type="date"
+                  max={settings.endDate || today}
+                  value={settings.startDate}
+                  onChange={(event) => updateSetting("startDate", event.target.value)}
+                />
+              </label>
+              <label>
+                종료일
+                <input
+                  type="date"
+                  min={settings.startDate || undefined}
+                  max={today}
+                  value={settings.endDate}
+                  onChange={(event) => updateSetting("endDate", event.target.value)}
+                />
+              </label>
+            </div>
+            <small>{settings.startDate && settings.endDate ? "직접 설정한 날짜 구간으로 백테스트합니다." : "비워두면 위의 최근 기간으로 백테스트합니다."}</small>
+          </div>
           <label>
             초기 자본
             <input type="number" value={settings.initialCash} onChange={(event) => updateSetting("initialCash", Number(event.target.value))} />
@@ -1082,7 +1374,7 @@ function App() {
                 <h2>{result?.symbol ?? settings.symbol} 과거 차트</h2>
                 <p>{status}</p>
               </div>
-              <div className="source-pill">{result ? `${result.symbol} · ${result.strategyLabel} · ${result.interval} · ${result.days}일` : "Binance API"}</div>
+              <div className="source-pill">{result ? `${result.symbol} · ${result.strategyLabel} · ${result.interval} · ${result.rangeLabel}` : "Binance API"}</div>
             </div>
             <BacktestChart result={result} />
           </div>
@@ -1121,6 +1413,7 @@ function App() {
           </div>
         </section>
       </section>
+      <AiBotSimulationPanel settings={settings} />
       <TestnetPanel settings={settings} />
     </main>
   );

@@ -223,6 +223,9 @@ function buildTrendVolumeDecision(
 
   if (positionSide && entryPrice > 0) {
     const pnlPct = positionSide === "LONG" ? ((current.close - entryPrice) / entryPrice) * 100 : ((entryPrice - current.close) / entryPrice) * 100;
+    if (longOnly && positionSide === "SHORT") {
+      return { side: "CLOSE_SHORT", reason: "VA long-only: close existing SHORT position", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
+    }
     if (positionSide === "LONG") {
       if (!partialTaken && current.close >= bands.upper) return { side: "TRIM_LONG", reason: "first take profit: upper Bollinger touch, reduce 50%", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
       if (trend.direction === "DOWN") return { side: "CLOSE_LONG", reason: "second exit: SuperTrend flipped bearish", pnlPct, diagnostics: { ...trendDiagnostics, score: 5 } };
